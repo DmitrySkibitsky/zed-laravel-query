@@ -195,6 +195,25 @@ describe('diagnostics in long-lived codebases', () => {
     );
   });
 
+  test('after SQL built at runtime, bare names are not checked', () => {
+    assert.deepEqual(messages(php(`User::select(DB::raw(full_name_sql('author')))->orderBy('author');`)), []);
+    assert.deepEqual(
+      messages(php(`$q = User::query();\n$q->selectRaw($sql);\n$q->orderBy('total');`)),
+      [],
+      'other statements',
+    );
+    assert.deepEqual(
+      messages(php(`$q = User::query();\n$q->selectFullName('author');\n$q->orderBy('author');`)),
+      [],
+      'an unknown method in another statement',
+    );
+    assert.deepEqual(
+      messages(php(`User::select(DB::raw('count(*) as total'))->orderBy('nmae');`)).length,
+      1,
+      'plain raw SQL',
+    );
+  });
+
   test('names a local scope selects are valid later', () => {
     assert.deepEqual(
       messages(

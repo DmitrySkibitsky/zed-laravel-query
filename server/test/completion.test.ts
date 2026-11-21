@@ -576,6 +576,8 @@ describe('long-lived codebases', () => {
     assert.deepEqual(await repo('PostRepository', '->count()'), [], 'declared non-model result');
     assert.ok((await repo('PostRepository', '->commentsGrid()')).includes('content'), 'setModel() in the method');
     assert.deepEqual(await repo('PostRepository', '->summary()'), [], 'an own method with an unknown result');
+    const own = await legacy.labels(php(`app(\\App\\Repositories\\PostRepository::class)->find(1, ['‸']);`));
+    assert.ok(own.includes('comments') && !own.includes('title'), 'its own find($id, $with): relations');
   });
 
   test('repositories through typed parameters and properties', async () => {
@@ -588,6 +590,19 @@ describe('long-lived codebases', () => {
     assert.ok((await at('title')).includes('title'), 'promoted constructor property');
     assert.ok((await at('email')).includes('email'), '@var property assigned app(X::class)');
     assert.ok((await at('slug')).includes('slug'), 'property assigned a typed parameter');
+    legacy.close(file);
+  });
+
+  test('container keys by the PhpStorm metadata: app(), make(), project helpers, properties', async () => {
+    const at = async (chain: string) => legacy.labels(php(`${chain}->where('‸');`));
+    assert.ok((await at(`app('posts.repository')->query()`)).includes('title'), 'the base module over a longer root');
+    assert.ok((await at(`app()->make('posts.repository')->query()`)).includes('title'), 'app()->make');
+    assert.ok((await at(`module_app('users')->createModel()`)).includes('email'), 'a class missing on disk is skipped');
+    assert.ok((await at(`module_app('users', 'createModel')`)).includes('email'), 'helper calling a method');
+    assert.ok((await at(`module_app('roles')`)).includes('slug'), 'class string value');
+    assert.deepEqual(await at(`module_app('nope')`), []);
+    const file = 'app/Services/ReportService.php';
+    assert.ok((await legacy.labels(REPORT_SERVICE.replace("'label'", "'‸'"), file)).includes('label'), 'property');
     legacy.close(file);
   });
 

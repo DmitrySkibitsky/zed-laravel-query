@@ -6,8 +6,9 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type ClassDecl, type FunctionDecl, literalValue, PhpDocument } from '../php/document.ts';
+import { type ClassDecl, type FunctionDecl, hasComputedRaw, literalValue, PhpDocument } from '../php/document.ts';
 import { tableForModel } from './inflector.ts';
+import { type MetaMaps, metaFiles, parseMeta } from './meta.ts';
 import { RELATION_TYPES } from './methods.ts';
 
 export interface RelationInfo {
@@ -38,6 +39,8 @@ export interface LocalScope {
   calls: string[];
   /** Names it selects `as` (`selectRaw('... as distance')`): valid in later clauses. */
   aliases: string[];
+  /** It selects SQL built at runtime (`DB::raw(full_name_sql('author'))`): any name may follow. */
+  computedSelect: boolean;
 }
 
 export interface ModelInfo {
@@ -65,6 +68,8 @@ export interface MethodInfo {
   delegatesTo?: string;
   /** `$this->setModel(Post::class); return $this->createModel();`: the model it switches to. */
   modelRef?: ClassRef;
+  /** Parameter names without `$`, in order. */
+  params: string[];
 }
 
 interface ClassInfo {
@@ -140,11 +145,72 @@ export class LaravelProject {
   private readonly migrationFiles = new Map<string, MigrationFile>();
   private migrationsScannedAt = 0;
   private modelIndex: { at: number; byTable: Map<string, string[]> } | undefined;
+  private metaPaths: string[];
+  private metaCache: { checked: number; stamp: string; maps: MetaMaps } | undefined;
 
-  constructor(root: string, migrationPaths: string[] = ['database/migrations']) {
+  constructor(
+    root: string,
+    migrationPaths: string[] = ['database/migrations'],
+    metaPaths: string[] = ['.phpstorm.meta.php'],
+  ) {
     this.root = root;
     this.migrationPaths = migrationPaths;
+    this.metaPaths = metaPaths;
     this.loadComposer();
+  }
+
+  setMetaPaths(paths: string[]): void {
+    this.metaPaths = paths;
+    this.metaCache = undefined;
+  }
+
+  /** The PhpStorm metadata maps, re-read when a file changes. */
+  private meta(): MetaMaps {
+    const now = Date.now();
+    if (this.metaCache && now - this.metaCache.checked < STAT_TTL_MS) {
+      return this.metaCache.maps;
+    }
+    const files = metaFiles(this.root, this.metaPaths);
+    const stamp = files
+      .map((file) => {
+        try {
+          return `${file}:${fs.statSync(file).mtimeMs}`;
+        } catch {
+          return file;
+        }
+      })
+      .join('|');
+    if (this.metaCache?.stamp === stamp) {
+      this.metaCache.checked = now;
+      return this.metaCache.maps;
+    }
+    const maps: MetaMaps = new Map();
+    for (const file of files) {
+      try {
+        parseMeta(fs.readFileSync(file, 'utf8'), maps);
+      } catch {
+        // An unreadable file: the others still count.
+      }
+    }
+    this.metaCache = { checked: now, stamp, maps };
+    return maps;
+  }
+
+  /**
+   * The class `fn('key')` returns by the PhpStorm metadata (`app('cache')`, a project's container
+   * helper). Several extensions may bind one key: of the classes found in the project, the one of
+   * the shortest root namespace (the base module over its client-specific variants), then by name.
+   */
+  containerBinding(fn: string, key: string): string | undefined {
+    const candidates = this.meta()
+      .get(fn.replace(/^\\/, '').toLowerCase())
+      ?.get(key)
+      ?.filter((cls) => this.classFile(cls) !== undefined);
+    if (!candidates?.length) {
+      return undefined;
+    }
+    const root = (cls: string) => cls.split('\\').slice(0, 2).join('\\').length;
+    return [...candidates].sort((a, b) => root(a) - root(b) || a.localeCompare(b))[0];
   }
 
   setMigrationPaths(paths: string[]): void {
@@ -497,6 +563,15 @@ export class LaravelProject {
   propertyType(fqn: string, property: string): string | undefined {
     for (const info of this.lineage(fqn)) {
       const type = info.propertyTypes.get(property);
+      // `$this->users = container_helper('users')`: resolved by the metadata when asked.
+      const container = type ? /^@container (\S+) (.*)$/.exec(type) : undefined;
+      if (container) {
+        const cls = this.containerBinding(container[1], container[2]);
+        if (cls) {
+          return `\\${cls}`;
+        }
+        continue;
+      }
       if (type) {
         return type;
       }
@@ -970,7 +1045,7 @@ function docVarType(doc: string, name: string): string | undefined {
 
 function methodInfoOf(document: PhpDocument, fn: FunctionDecl, decl: ClassDecl): MethodInfo {
   const t = document.tokens;
-  const info: MethodInfo = {};
+  const info: MethodInfo = { params: fn.params.map((p) => p.name.slice(1)) };
   let native = '';
   if (document.isOp(fn.paramsClose + 1, ':')) {
     for (let j = fn.paramsClose + 2; j < t.length && !document.isOp(j, '{', ';'); j++) {
@@ -1064,11 +1139,18 @@ function assignedType(
   }
   if (t[s]?.type === 'ident' && /^\\?(app|resolve)$/i.test(t[s].value) && document.isOp(s + 1, '(')) {
     const ref = classReference(document, s + 2, document.match[s + 1] - 1, decl.fqn ?? '', fn.bodyStart, s);
-    return ref.related ? `\\${ref.related}` : undefined;
+    if (ref.related) {
+      return `\\${ref.related}`;
+    }
   }
   if (t[s]?.type === 'var' && s === e) {
     const param = fn.params.find((p) => p.name === t[s].value);
     return param?.type ? qualifyType(document, param.type, decl) : undefined;
+  }
+  // helper('key'): a container helper the PhpStorm metadata may map; resolved later
+  const key = literalValue(t[s + 2]);
+  if (t[s]?.type === 'ident' && document.isOp(s + 1, '(') && key && document.isOp(s + 3, ')', ',')) {
+    return `@container ${t[s].value.replace(/^\\/, '')} ${key}`;
   }
   return undefined;
 }
@@ -1078,7 +1160,7 @@ const JOINS = new Set(['join', 'leftjoin', 'rightjoin', 'crossjoin', 'joinwhere'
 /** Joins and method calls in a local scope's own body (not in closures it passes on). */
 function localScopeOf(document: PhpDocument, fn: FunctionDecl): LocalScope {
   const t = document.tokens;
-  const scope: LocalScope = { joins: [], calls: [], aliases: [] };
+  const scope: LocalScope = { joins: [], calls: [], aliases: [], computedSelect: false };
   for (let j = fn.bodyStart; j < fn.bodyEnd; j++) {
     const text = literalValue(t[j]);
     if (text) {
@@ -1093,6 +1175,11 @@ function localScopeOf(document: PhpDocument, fn: FunctionDecl): LocalScope {
       continue;
     }
     const method = t[j + 1].value.toLowerCase();
+    if (/^(select|addselect|selectraw)$/.test(method)) {
+      const close = document.match[j + 2];
+      const raw = method === 'selectraw' && !(close === j + 4 && literalValue(t[j + 3]) !== undefined);
+      scope.computedSelect ||= raw || (close > j && hasComputedRaw(document, j + 2, close));
+    }
     const table = JOINS.has(method) ? literalValue(t[j + 3]) : undefined;
     if (table) {
       scope.joins.push(table);

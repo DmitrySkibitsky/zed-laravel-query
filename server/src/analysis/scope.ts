@@ -8,7 +8,7 @@
 import { tableForModel } from '../laravel/inflector.ts';
 import { closureKind, isLaravelQueryMethod, POWER_JOINS, TERMINAL_METHODS } from '../laravel/methods.ts';
 import type { LaravelProject, LocalScope, ModelInfo } from '../laravel/project.ts';
-import { type FunctionDecl, literalValue, type Param, type PhpDocument } from '../php/document.ts';
+import { type FunctionDecl, hasComputedRaw, literalValue, type Param, type PhpDocument } from '../php/document.ts';
 import { type CallSite, type Chain, callArgs, chainEndingAt, type Segment, segmentsAfter, siteOf } from './chain.ts';
 
 export type TableOrigin =
@@ -99,8 +99,13 @@ const BUILDER_TYPES =
   /(^|\\|\|)(Builder|EloquentBuilder|QueryBuilder|JoinClause|Relation|HasMany|HasOne|BelongsTo|BelongsToMany|MorphMany|MorphOne|MorphTo|MorphToMany|HasManyThrough|HasOneThrough)(<|$|\|)/;
 const BLUEPRINT_TYPE = /(^|\\)Blueprint$/;
 const POWER_JOIN_METHODS = new Set(POWER_JOINS.toLowerCase().split(' '));
+/** Methods naming what the query selects: their aliases count in later clauses. */
+const SELECT_METHODS = new Set(['select', 'addselect', 'selectraw', 'selectsub']);
+
 /** Methods whose closure gets the same query: what it joins, the chain has. */
 export const SAME_QUERY_CLOSURES = new Set(['when', 'unless', 'tap']);
+
+const CONTAINER_MAKE = 'illuminate\\contracts\\container\\container::make';
 
 /** Repository methods that give the model, its query or its rows (Prettus, Cartalyst and alike). */
 const REPOSITORY_FORWARDS = new Set(
@@ -420,7 +425,13 @@ export class Analyzer {
         return undefined;
       }
       const first = callArgs(this.doc, open, close)[0];
-      const fqn = this.classArg(first);
+      // app(Post::class), or app('cache') by the PhpStorm metadata
+      const key = this.literalArg(first);
+      const fqn =
+        this.classArg(first) ??
+        (key
+          ? (this.project?.containerBinding('app', key) ?? this.project?.containerBinding(CONTAINER_MAKE, key))
+          : undefined);
       return fqn && first ? { className: `\\${fqn}`, tok: first[0] } : undefined;
     };
     if (root.kind === 'function' && /^\\?(app|resolve)$/i.test(root.name)) {
@@ -446,12 +457,22 @@ export class Analyzer {
 
   private scopeOfFunctionRoot(name: string, open: number, close: number): Scope {
     const lower = name.toLowerCase().replace(/^\\/, '');
+    const args = open >= 0 ? callArgs(this.doc, open, close) : [];
     // tap($query, fn) / with($query) return their first argument
-    if ((lower === 'tap' || lower === 'with') && open >= 0) {
-      const first = callArgs(this.doc, open, close)[0];
-      if (first) {
-        return this.scopeOfExpression(first[1]);
+    if ((lower === 'tap' || lower === 'with') && args[0]) {
+      return this.scopeOfExpression(args[0][1]);
+    }
+    // A container helper the PhpStorm metadata maps: `module_app('users')`
+    const key = this.literalArg(args[0]);
+    const cls = key ? this.project?.containerBinding(lower, key) : undefined;
+    if (cls && args[0]) {
+      let scope = this.scopeOfClass(`\\${cls}`, args[0][0]);
+      // `module_app('users', 'createModel')`: helpers that call a method of what they resolve
+      const method = this.literalArg(args[1]);
+      if (method && args[1] && /^[A-Za-z_]\w*$/.test(method)) {
+        scope = this.applySegment(scope, { name: method, nameTok: args[1][0], open: args[1][0], close: args[1][0] });
       }
+      return scope;
     }
     return emptyScope();
   }
@@ -726,6 +747,13 @@ export class Analyzer {
       for (const range of args) {
         this.collectAliases(range, next.aliases);
       }
+      // `DB::raw(full_name_sql('author'))`, `selectRaw($sql)`: SQL we cannot read may name anything.
+      if (
+        (name === 'selectraw' && !this.literalArg(args[0])) ||
+        (segment.open !== undefined && hasComputedRaw(this.doc, segment.open, segment.close ?? segment.open))
+      ) {
+        next.partial = true;
+      }
       return next;
     }
     const aggregate = AGGREGATE_ALIASES[name];
@@ -818,6 +846,7 @@ export class Analyzer {
     if (scope.model?.scopes.has(name)) {
       const next = cloneScope(scope);
       for (const local of this.localScopes(scope.model, name, new Set())) {
+        next.partial ||= local.computedSelect;
         for (const join of local.joins) {
           const parsed = parseTableExpression(join);
           if (!next.tables.some((t) => t.name === parsed.name && t.alias === parsed.alias)) {
@@ -1125,8 +1154,18 @@ export class Analyzer {
           lower === 'from' ||
           SUB_ALIAS_METHODS.has(lower) ||
           POWER_JOIN_METHODS.has(lower) ||
-          SAME_QUERY_CLOSURES.has(lower)
+          SAME_QUERY_CLOSURES.has(lower) ||
+          SELECT_METHODS.has(lower)
         ) {
+          result = this.applySegment(result, segment);
+        } else if (
+          segment.open !== undefined &&
+          !isLaravelQueryMethod(lower) &&
+          !result.model?.relations.has(lower) &&
+          !POWER_JOIN_METHODS.has(lower)
+        ) {
+          // `$q->withAuthor()` / `$q->selectFullName('author')`: a local scope's joins and
+          // aliases, or a method we do not know that may have selected more.
           result = this.applySegment(result, segment);
         }
         if (result.inferred && segment.open !== undefined && segment.close !== undefined) {
