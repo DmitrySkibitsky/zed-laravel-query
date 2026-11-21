@@ -13,7 +13,7 @@
 | `server/src/features/` | Completion, hover, definition, diagnostics                                                 |
 | `server/src/usage.ts`  | Usage statistics (frecency, trends)                                                        |
 | `server/test/`         | Unit and feature tests, end-to-end tests of the bundle (SQLite), driver integration tests  |
-| `server/bench/`        | Completion latency on a real project and database                                          |
+| `server/bench/`        | Completion latency and coverage on a real project and database                             |
 | `server/dist/`         | The bundle (`make server`), not committed: a GitHub release asset                          |
 | `scripts/version.mjs`  | One version in extension.toml, Cargo.toml/.lock and server/package(-lock).json             |
 
@@ -38,6 +38,7 @@ make test      # cargo test + server unit, feature and end-to-end tests
 make db-up     # MySQL 8.4, MariaDB 11.8, PostgreSQL 17 in docker (ports 53306, 53307, 55432)
 make test-db   # driver tests against them (LQ_TEST_MYSQL / LQ_TEST_MARIADB / LQ_TEST_PGSQL)
 make bench     # completion latency (LQ_BENCH_* variables, see server/bench/completion.bench.ts)
+make coverage  # what resolves on a real project (LQ_AUDIT_* variables, see server/bench/coverage.ts)
 make build     # server bundle + extension wasm
 make check     # what CI runs besides test-db: lint and test
 ```
@@ -103,7 +104,10 @@ Versions follow semver; while on 0.x, a breaking change of settings bumps the mi
 Always: `make check` and `make build`; `make test-db` when a driver changed. A change to what
 users see in Zed is also tried there with the dev extension. A change that can affect latency
 (tokenizer, analysis, completion building) comes with `make bench` numbers before/after, and the
-[Performance](README.md#performance) table is updated when they move.
+[Performance](README.md#performance) table is updated when they move. A change to how queries
+resolve (scope inference, models, relations) comes with `make coverage` on a real project before
+and after (`LQ_AUDIT_OUT` then `LQ_AUDIT_COMPARE`), and the arguments it stopped resolving are
+explained.
 
 ## Tests
 

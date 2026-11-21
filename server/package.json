@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node build.mjs && node --test \"test/**/*.test.ts\"",
     "test:unit": "node --test --test-skip-pattern=e2e \"test/**/*.test.ts\"",
-    "bench": "node bench/completion.bench.ts"
+    "bench": "node bench/completion.bench.ts",
+    "coverage": "node bench/coverage.ts"
   },
   "dependencies": {
     "mysql2": "3.24.6",
