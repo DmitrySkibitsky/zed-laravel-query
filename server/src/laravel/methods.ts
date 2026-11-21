@@ -51,6 +51,10 @@ function catalog(spec: Record<string, string>): MethodCatalog {
   return out;
 }
 
+/** Joins of a relation path (kirschbaum-development/eloquent-power-joins). */
+export const POWER_JOINS =
+  'joinRelationship leftJoinRelationship rightJoinRelationship joinRelationshipUsingAlias leftJoinRelationshipUsingAlias rightJoinRelationshipUsingAlias';
+
 /** Query builder, Eloquent builder, relations, join clauses, models (static and instance). */
 export const BUILDER_METHODS = catalog({
   'select addSelect distinct groupBy': 'c0+',
@@ -111,6 +115,7 @@ export const BUILDER_METHODS = catalog({
   'wherePivot orWherePivot wherePivotNot orWherePivotNot wherePivotIn orWherePivotIn wherePivotNotIn orWherePivotNotIn wherePivotNull orWherePivotNull wherePivotNotNull orWherePivotNotNull wherePivotBetween orWherePivotBetween':
     'p0',
   'withPivot orderByPivot': 'p0+',
+  [POWER_JOINS]: 'r0',
   onConnection: 'n0',
 });
 
@@ -266,13 +271,15 @@ export const OPERATORS = [
 ];
 
 /** Closure kinds: what a closure passed to a builder method receives. */
-export type ClosureKind = 'nested' | 'join' | 'relation' | 'subquery' | 'chunk' | 'schema' | 'when';
+export type ClosureKind = 'nested' | 'join' | 'relationJoin' | 'relation' | 'subquery' | 'chunk' | 'schema' | 'when';
 
 const CLOSURES: Record<string, string> = {
   nested:
     'where orWhere whereNot orWhereNot having orHaving whereNested addNestedWhereQuery tap whereAny orWhereAny whereAll orWhereAll',
   when: 'when unless',
   join: 'join leftJoin rightJoin crossJoin joinWhere leftJoinWhere rightJoinWhere',
+  // kirschbaum-development/eloquent-power-joins
+  relationJoin: `${POWER_JOINS}`,
   relation:
     'whereHas orWhereHas whereDoesntHave orWhereDoesntHave has orHas doesntHave orDoesntHave withWhereHas with withCount withExists withMax withMin withSum withAvg withAggregate load loadMissing loadCount loadMax loadMin loadSum loadAvg whereHasMorph orWhereHasMorph whereDoesntHaveMorph orWhereDoesntHaveMorph whereRelation orWhereRelation',
   subquery:
@@ -290,6 +297,34 @@ for (const [kind, names] of Object.entries(CLOSURES)) {
 export function closureKind(method: string): ClosureKind | undefined {
   return CLOSURE_KINDS.get(method.toLowerCase());
 }
+
+/** Builder, model and relation methods taking no column names: nothing unknown happens in them. */
+const PLAIN_METHODS = new Set(
+  `query newQuery toSql toRawSql dd dump ddRawSql dumpRawSql distinct limit take skip offset forPage
+  withTrashed onlyTrashed withoutTrashed lockForUpdate sharedLock whereRaw orWhereRaw havingRaw orHavingRaw
+  orderByRaw groupByRaw selectRaw fromRaw inRandomOrder exists doesntExist existsOr doesntExistOr cursor
+  toBase getQuery getModel withoutGlobalScopes withoutGlobalScope withGlobalScope clone setModel setQuery
+  applyScopes delete forceDelete restore touch save push refresh fresh replicate toArray toJson getKey
+  getTable getConnection hydrate associate dissociate attach detach sync syncWithoutDetaching toggle
+  updateExistingPivot getRelated getParent getResults withTimestamps as using withDefault latestOfMany
+  oldestOfMany ofMany one chaperone inverse whereKey whereKeyNot orWhereKey`
+    .split(/\s+/)
+    .map((m) => m.toLowerCase()),
+);
+
+/** A method of Laravel's builders, models or relations (not a macro, a scope or a project method). */
+export function isLaravelQueryMethod(method: string): boolean {
+  const name = method.toLowerCase();
+  return BUILDER_METHODS.has(name) || CLOSURE_KINDS.has(name) || TERMINAL_METHODS.has(name) || PLAIN_METHODS.has(name);
+}
+
+/** Model methods taking attribute names: accessors and appended attributes too, not only columns. */
+export const ATTRIBUTE_METHODS = new Set(
+  `getAttribute setAttribute getOriginal getRawOriginal getAttributeValue isDirty isClean wasChanged only
+  makeHidden makeVisible setHidden setVisible mergeFillable mergeGuarded append setAppends`
+    .split(/\s+/)
+    .map((m) => m.toLowerCase()),
+);
 
 /** Methods that run the query: the chain continues on a collection or a model. */
 export const TERMINAL_METHODS = new Set(

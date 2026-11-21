@@ -181,6 +181,27 @@ describe('diagnostics in long-lived codebases', () => {
       [],
       'fragments',
     );
+    assert.deepEqual(
+      messages(php(`$user->setAttribute('full_name', 'x'); $user->isDirty('display_name');`)),
+      [],
+      'attributes',
+    );
+    assert.deepEqual(
+      messages(
+        php(`User::query()->addSelectDistance($lat, $lng)->having('distance', '<', 1)->where('users.nmae', 1);`),
+      ),
+      ["Unknown column 'users.nmae' in 'users'"],
+      'after an unknown method only qualified columns are checked',
+    );
+  });
+
+  test('names a local scope selects are valid later', () => {
+    assert.deepEqual(
+      messages(
+        php(`/** @var \\App\\Models\\Legacy\\Account $account */\n$account->withPostCount()->orderBy('post_count');`),
+      ),
+      [],
+    );
   });
 
   test('migrations are history: not checked against the current schema', () => {

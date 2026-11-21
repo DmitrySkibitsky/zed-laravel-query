@@ -36,6 +36,8 @@ export interface LocalScope {
   joins: string[];
   /** Other methods it calls on the query (lower-cased): scopes it builds on. */
   calls: string[];
+  /** Names it selects `as` (`selectRaw('... as distance')`): valid in later clauses. */
+  aliases: string[];
 }
 
 export interface ModelInfo {
@@ -53,6 +55,18 @@ export interface ModelInfo {
   scopes: Map<string, LocalScope>;
 }
 
+/** A class named in code: resolved, or a reference resolved per model / repository. */
+export type ClassRef = Pick<RelationInfo, 'related' | 'relatedRef'>;
+
+export interface MethodInfo {
+  /** Declared return type (`@return`, else native), class names qualified (`\\App\\User|null`). */
+  returnType?: string;
+  /** `return $this->other(...)...`: the method its result comes from (lower-cased). */
+  delegatesTo?: string;
+  /** `$this->setModel(Post::class); return $this->createModel();`: the model it switches to. */
+  modelRef?: ClassRef;
+}
+
 interface ClassInfo {
   fqn: string;
   file: string;
@@ -67,6 +81,12 @@ interface ClassInfo {
   connectionAttribute?: string;
   relations: Map<string, RelationInfo>;
   scopes: Map<string, LocalScope>;
+  /** Declared property types (`$repository` → `\\App\\Repositories\\UserRepository`), qualified. */
+  propertyTypes: Map<string, string>;
+  /** Methods by lower-cased name. */
+  methods: Map<string, MethodInfo>;
+  /** A repository's model: `model()` returning a class, `$this->setModel(...)`, `$model = X::class`. */
+  modelRef?: ClassRef;
 }
 
 const MODEL_BASES = new Set(
@@ -331,6 +351,10 @@ export class LaravelProject {
   /** Eloquent model info, or undefined when `fqn` is not a model. */
   model(fqn: string): ModelInfo | undefined {
     const key = fqn.replace(/^\\/, '').toLowerCase();
+    // `Model` itself (a declared `: Model` result) has no table.
+    if (MODEL_BASES.has(key)) {
+      return undefined;
+    }
     const now = Date.now();
     if (now - this.modelCacheAt > STAT_TTL_MS) {
       this.modelCache.clear();
@@ -441,6 +465,77 @@ export class LaravelProject {
   extendsAny(fqn: string, bases: Set<string>): boolean {
     const key = fqn.replace(/^\\/, '').toLowerCase();
     return bases.has(key) || this.ancestors(fqn).some((c) => bases.has(c.replace(/^\\/, '')));
+  }
+
+  /** Whether a file declares `fqn` (project or vendor). */
+  hasClass(fqn: string): boolean {
+    return this.classInfo(fqn) !== undefined;
+  }
+
+  /** The class, its traits, its parents and their traits, nearest first. */
+  private lineage(fqn: string): ClassInfo[] {
+    const out: ClassInfo[] = [];
+    let current: string | undefined = fqn;
+    for (let depth = 0; current && depth < 12; depth++) {
+      const info = this.classInfo(current);
+      if (!info) {
+        break;
+      }
+      out.push(info);
+      for (const trait of info.traits) {
+        const traitInfo = this.classInfo(trait);
+        if (traitInfo) {
+          out.push(traitInfo);
+        }
+      }
+      current = info.extends;
+    }
+    return out;
+  }
+
+  /** Declared type of a property (`$users`), qualified, from the class or its ancestors. */
+  propertyType(fqn: string, property: string): string | undefined {
+    for (const info of this.lineage(fqn)) {
+      const type = info.propertyTypes.get(property);
+      if (type) {
+        return type;
+      }
+    }
+    return undefined;
+  }
+
+  /** A method's declared return type / delegation, from the class or its ancestors. */
+  methodInfo(fqn: string, method: string): MethodInfo | undefined {
+    const name = method.toLowerCase();
+    for (const info of this.lineage(fqn)) {
+      const found = info.methods.get(name);
+      if (found) {
+        return found;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * The model a repository class works on: its (or an ancestor's) `model()` returning a class,
+   * `$this->setModel(...)`, or `$model = Post::class`; references resolved like relations'.
+   */
+  repositoryModel(fqn: string): ModelInfo | undefined {
+    const ref = this.lineage(fqn).find((info) => info.modelRef)?.modelRef;
+    return ref ? this.modelOfRef(ref, fqn) : undefined;
+  }
+
+  /** The model a class reference names, properties looked up on `owner` (late static binding). */
+  modelOfRef(ref: ClassRef, owner: string): ModelInfo | undefined {
+    let related = ref.related;
+    if (!related && ref.relatedRef?.property) {
+      const property = ref.relatedRef.property;
+      const holder = this.lineage(owner).find((c) => c.classProperties.has(property) || c.properties.has(property));
+      related = (holder?.classProperties.get(property) ?? holder?.properties.get(property))?.replace(/^\\/, '');
+    } else if (!related && ref.relatedRef?.hint) {
+      related = this.resolveClassHint(ref.relatedRef.hint, ref.relatedRef.definedIn);
+    }
+    return related ? this.model(related) : undefined;
   }
 
   /** Model of a factory class: `$model` or the naming convention. */
@@ -720,6 +815,8 @@ function classInfoOf(file: string, document: PhpDocument, decl: ClassDecl, fqn: 
     classProperties: new Map(),
     relations: new Map(),
     scopes: new Map(),
+    propertyTypes: new Map(),
+    methods: new Map(),
   };
 
   // Attributes before the class: #[Table('name', key: 'uuid')], #[Connection('name')]
@@ -764,6 +861,12 @@ function classInfoOf(file: string, document: PhpDocument, decl: ClassDecl, fqn: 
       }
       continue;
     }
+    if (token.type === 'var') {
+      const type = declaredPropertyType(document, i, token.value, decl);
+      if (type && !info.propertyTypes.has(token.value)) {
+        info.propertyTypes.set(token.value, type);
+      }
+    }
     if (token.type === 'var' && document.isOp(i + 1, '=') && t[i - 1]?.type === 'ident') {
       const value = literalValue(t[i + 2]);
       if (value !== undefined && document.isOp(i + 3, ';')) {
@@ -786,8 +889,188 @@ function classInfoOf(file: string, document: PhpDocument, decl: ClassDecl, fqn: 
     if (scopeName) {
       info.scopes.set(scopeName.toLowerCase(), localScopeOf(document, fn));
     }
+    info.methods.set(fn.name.toLowerCase(), methodInfoOf(document, fn, decl));
+    collectMembers(document, fn, info, decl);
+  }
+  // A repository that only sets its model in methods (`grid()`): the first one.
+  info.modelRef ??= [...info.methods.values()].find((m) => m.modelRef)?.modelRef;
+  info.modelRef ??= info.classProperties.has('$model')
+    ? { related: info.classProperties.get('$model') }
+    : info.properties.get('$model')?.includes('\\')
+      ? { related: info.properties.get('$model')?.replace(/^\\/, '') }
+      : undefined;
+  return info;
+}
+
+const BUILTIN_TYPES = new Set(
+  'null array int integer string mixed bool boolean void callable float double iterable object false true never resource'.split(
+    ' ',
+  ),
+);
+
+/** A type as written, with class names qualified (`?User|Builder` → `?\\App\\Models\\User|\\…\\Builder`). */
+function qualifyType(document: PhpDocument, type: string, decl: ClassDecl): string {
+  return type.replace(/\$this|\\?[A-Za-z_][\w\\]*/g, (name) => {
+    const lower = name.toLowerCase();
+    if (BUILTIN_TYPES.has(lower)) {
+      return name;
+    }
+    if (lower === 'static' || lower === 'self' || lower === '$this') {
+      return 'static';
+    }
+    if (lower === 'parent') {
+      return decl.extends ? `\\${decl.extends}` : name;
+    }
+    return `\\${document.resolveClass(name)}`;
+  });
+}
+
+const MODIFIERS = new Set(['public', 'protected', 'private', 'var', 'static', 'readonly']);
+
+/**
+ * Type of a property declared at token `i` (`private UserRepository $users;`, a promoted
+ * constructor parameter, or `@var` above it); undefined when `i` is not a property.
+ */
+function declaredPropertyType(document: PhpDocument, i: number, name: string, decl: ClassDecl): string | undefined {
+  const t = document.tokens;
+  let j = i - 1;
+  while (
+    j > decl.open &&
+    (t[j].type === 'ident' || document.isOp(j, '?', '|', '&')) &&
+    !MODIFIERS.has(t[j].value.toLowerCase())
+  ) {
+    j--;
+  }
+  if (t[j]?.type !== 'ident' || !MODIFIERS.has(t[j].value.toLowerCase())) {
+    return undefined;
+  }
+  const native = t
+    .slice(j + 1, i)
+    .map((token) => token.value)
+    .join('');
+  let first = j;
+  while (first > decl.open && t[first - 1].type === 'ident' && MODIFIERS.has(t[first - 1].value.toLowerCase())) {
+    first--;
+  }
+  const docs = document.docsBetween(first - 1, i);
+  const doc = docs.length ? docVarType(docs[docs.length - 1].value, name) : undefined;
+  const type = doc ?? (native || undefined);
+  return type ? qualifyType(document, type, decl) : undefined;
+}
+
+/** `@var Type $name` or a bare `@var Type`. */
+function docVarType(doc: string, name: string): string | undefined {
+  const named = new RegExp(`@var\\s+([^\\s*]+)\\s+\\$${name.slice(1)}\\b`).exec(doc);
+  if (named) {
+    return named[1];
+  }
+  const bare = /@var\s+([^\s*$]+)\s*(\*\/|\n)/.exec(doc);
+  return bare?.[1];
+}
+
+function methodInfoOf(document: PhpDocument, fn: FunctionDecl, decl: ClassDecl): MethodInfo {
+  const t = document.tokens;
+  const info: MethodInfo = {};
+  let native = '';
+  if (document.isOp(fn.paramsClose + 1, ':')) {
+    for (let j = fn.paramsClose + 2; j < t.length && !document.isOp(j, '{', ';'); j++) {
+      native += t[j].value;
+    }
+  }
+  const doc = fn.doc ? /@return\s+([^\s*]+)/.exec(fn.doc)?.[1] : undefined;
+  const type = doc ?? (native || undefined);
+  if (type && !/^\??mixed$/i.test(type)) {
+    info.returnType = qualifyType(document, type, decl);
+  }
+  for (let j = fn.bodyStart; j > 0 && j < fn.bodyEnd; j++) {
+    if (document.isIdent(j, 'return') && document.enclosingFunctions(j)[0] === fn) {
+      if (
+        t[j + 1]?.value === '$this' &&
+        document.isOp(j + 2, '->') &&
+        t[j + 3]?.type === 'ident' &&
+        document.isOp(j + 4, '(')
+      ) {
+        info.delegatesTo = t[j + 3].value.toLowerCase();
+      }
+      break;
+    }
   }
   return info;
+}
+
+/**
+ * What a method body tells about the class: a repository's model (`model()` returning a class,
+ * `$this->setModel(...)`), and property types from assignments (`$this->users = app(UserRepository::class)`).
+ */
+function collectMembers(document: PhpDocument, fn: FunctionDecl, info: ClassInfo, decl: ClassDecl): void {
+  const t = document.tokens;
+  if (fn.bodyStart < 0) {
+    return;
+  }
+  const statementEnd = (from: number) => {
+    let end = from;
+    while (end + 1 < fn.bodyEnd && !document.isOp(end + 1, ';')) {
+      end = document.isOp(end + 1, '(', '[', '{') && document.match[end + 1] > end ? document.match[end + 1] : end + 1;
+    }
+    return end;
+  };
+  for (let j = fn.bodyStart; j < fn.bodyEnd; j++) {
+    if (fn.name?.toLowerCase() === 'model' && document.isIdent(j, 'return') && !info.modelRef) {
+      const ref = classReference(document, j + 1, statementEnd(j + 1), info.fqn, fn.bodyStart, j);
+      if (ref.related || ref.relatedRef) {
+        info.modelRef = ref;
+      }
+    }
+    if (t[j].value !== '$this' || !document.isOp(j + 1, '->') || t[j + 2]?.type !== 'ident') {
+      continue;
+    }
+    if (t[j + 2].value.toLowerCase() === 'setmodel' && document.isOp(j + 3, '(')) {
+      const close = document.match[j + 3];
+      const arg = close > j + 4 ? splitArgs(document, j + 3, close)[0] : undefined;
+      const ref = arg ? classReference(document, arg[0], arg[1], info.fqn, fn.bodyStart, j) : {};
+      if (ref.related || ref.relatedRef) {
+        // The constructor sets the repository's model; another method switches it for its result.
+        const method = info.methods.get(fn.name?.toLowerCase() ?? '');
+        if (fn.name?.toLowerCase() === '__construct') {
+          info.modelRef ??= ref;
+        } else if (method && !method.modelRef) {
+          method.modelRef = ref;
+        }
+      }
+      continue;
+    }
+    // $this->users = app(UserRepository::class) / new UserRepository / $users (a typed parameter)
+    const property = `$${t[j + 2].value}`;
+    if (!document.isOp(j + 3, '=') || info.propertyTypes.has(property)) {
+      continue;
+    }
+    const type = assignedType(document, j + 4, statementEnd(j + 4), fn, decl);
+    if (type) {
+      info.propertyTypes.set(property, type);
+    }
+  }
+}
+
+function assignedType(
+  document: PhpDocument,
+  s: number,
+  e: number,
+  fn: FunctionDecl,
+  decl: ClassDecl,
+): string | undefined {
+  const t = document.tokens;
+  if (document.isIdent(s, 'new') && t[s + 1]?.type === 'ident') {
+    return qualifyType(document, t[s + 1].value, decl);
+  }
+  if (t[s]?.type === 'ident' && /^\\?(app|resolve)$/i.test(t[s].value) && document.isOp(s + 1, '(')) {
+    const ref = classReference(document, s + 2, document.match[s + 1] - 1, decl.fqn ?? '', fn.bodyStart, s);
+    return ref.related ? `\\${ref.related}` : undefined;
+  }
+  if (t[s]?.type === 'var' && s === e) {
+    const param = fn.params.find((p) => p.name === t[s].value);
+    return param?.type ? qualifyType(document, param.type, decl) : undefined;
+  }
+  return undefined;
 }
 
 const JOINS = new Set(['join', 'leftjoin', 'rightjoin', 'crossjoin', 'joinwhere', 'leftjoinwhere', 'rightjoinwhere']);
@@ -795,8 +1078,14 @@ const JOINS = new Set(['join', 'leftjoin', 'rightjoin', 'crossjoin', 'joinwhere'
 /** Joins and method calls in a local scope's own body (not in closures it passes on). */
 function localScopeOf(document: PhpDocument, fn: FunctionDecl): LocalScope {
   const t = document.tokens;
-  const scope: LocalScope = { joins: [], calls: [] };
+  const scope: LocalScope = { joins: [], calls: [], aliases: [] };
   for (let j = fn.bodyStart; j < fn.bodyEnd; j++) {
+    const text = literalValue(t[j]);
+    if (text) {
+      for (const match of text.matchAll(/\bas\s+[`"']?(\w+)/gi)) {
+        scope.aliases.push(match[1].toLowerCase());
+      }
+    }
     if (!document.isOp(j, '->') || t[j + 1]?.type !== 'ident' || !document.isOp(j + 2, '(')) {
       continue;
     }
@@ -812,6 +1101,54 @@ function localScopeOf(document: PhpDocument, fn: FunctionDecl): LocalScope {
     }
   }
   return scope;
+}
+
+/**
+ * The class the expression [s, e] names: `Post::class`, a class string, a property holding it
+ * (`static::$postModel`, `$this->postModel`), a helper given a class path (`model_class('Post')`),
+ * or a variable assigned in [from, before).
+ */
+function classReference(
+  document: PhpDocument,
+  s: number,
+  e: number,
+  definedIn: string,
+  from: number,
+  before: number,
+  depth = 0,
+): ClassRef {
+  const t = document.tokens;
+  const [a, c] = [t[s], t[s + 2]];
+  if (a?.type === 'ident' && document.isOp(s + 1, '::') && c?.value.toLowerCase() === 'class') {
+    return { related: document.resolveClass(a.value) };
+  }
+  // static::$postModel, self::$postModel, $this->postModel
+  if (a?.type === 'ident' && /^(static|self)$/i.test(a.value) && document.isOp(s + 1, '::') && c?.type === 'var') {
+    return { relatedRef: { property: c.value, definedIn } };
+  }
+  if (a?.type === 'var' && a.value === '$this' && document.isOp(s + 1, '->') && c?.type === 'ident' && s + 2 === e) {
+    return { relatedRef: { property: `$${c.value}`, definedIn } };
+  }
+  // model_class('Lists\Post'): a helper resolving a class path at runtime
+  const hint = literalValue(c);
+  if (a?.type === 'ident' && document.isOp(s + 1, '(') && hint && document.isOp(s + 3, ')') && s + 3 === e) {
+    return { relatedRef: { hint, definedIn } };
+  }
+  // `$postModel = model_class('Post'); return $this->hasMany($postModel)`: its last assignment
+  if (a?.type === 'var' && s === e && depth === 0) {
+    for (let p = before - 1; p >= from; p--) {
+      if (t[p].type === 'var' && t[p].value === a.value && document.isOp(p + 1, '=') && !document.isOp(p - 1, '->')) {
+        let end = p + 2;
+        while (end < before && !document.isOp(end + 1, ';')) {
+          end++;
+        }
+        return classReference(document, p + 2, end, definedIn, from, before, depth + 1);
+      }
+    }
+    return {};
+  }
+  const literal = s === e ? literalValue(a) : undefined;
+  return literal?.includes('\\') || (literal && /^[A-Z]/.test(literal)) ? { related: literal.replace(/^\\/, '') } : {};
 }
 
 /** `return $this->hasMany(Post::class, 'user_id')` inside a method body. */
@@ -837,47 +1174,8 @@ function relationOf(
     const args = splitArgs(document, open, close < 0 ? to : close).map(([s, e]): [number, number] =>
       t[s]?.type === 'ident' && document.isOp(s + 1, ':') && s + 2 <= e ? [s + 2, e] : [s, e],
     );
-    /** The class an expression [s, e] names. */
-    const classRef = (s: number, e: number, depth = 0): Pick<RelationInfo, 'related' | 'relatedRef'> => {
-      const [a, c] = [t[s], t[s + 2]];
-      if (a?.type === 'ident' && document.isOp(s + 1, '::') && c?.value.toLowerCase() === 'class') {
-        return { related: document.resolveClass(a.value) };
-      }
-      // static::$postModel, self::$postModel, $this->postModel
-      if (a?.type === 'ident' && /^(static|self)$/i.test(a.value) && document.isOp(s + 1, '::') && c?.type === 'var') {
-        return { relatedRef: { property: c.value, definedIn } };
-      }
-      if (a?.type === 'var' && a.value === '$this' && document.isOp(s + 1, '->') && c?.type === 'ident') {
-        return { relatedRef: { property: `$${c.value}`, definedIn } };
-      }
-      // model_class('Lists\Post'): a helper resolving a class path at runtime
-      const hint = literalValue(c);
-      if (a?.type === 'ident' && document.isOp(s + 1, '(') && hint && document.isOp(s + 3, ')') && s + 3 === e) {
-        return { relatedRef: { hint, definedIn } };
-      }
-      // `$postModel = model_class('Post'); return $this->hasMany($postModel)`: its last assignment
-      if (a?.type === 'var' && s === e && depth === 0) {
-        for (let p = i - 1; p >= from; p--) {
-          if (
-            t[p].type === 'var' &&
-            t[p].value === a.value &&
-            document.isOp(p + 1, '=') &&
-            !document.isOp(p - 1, '->')
-          ) {
-            let end = p + 2;
-            while (end < i && !document.isOp(end + 1, ';')) {
-              end++;
-            }
-            return classRef(p + 2, end, depth + 1);
-          }
-        }
-        return {};
-      }
-      const literal = s === e ? literalValue(a) : undefined;
-      return literal ? { related: literal.replace(/^\\/, '') } : {};
-    };
-    const classArg = (k: number): Pick<RelationInfo, 'related' | 'relatedRef'> =>
-      args[k] ? classRef(args[k][0], args[k][1]) : {};
+    const classArg = (k: number): ClassRef =>
+      args[k] ? classReference(document, args[k][0], args[k][1], definedIn, from, i) : {};
     const type = method.value.toLowerCase();
     const relation: RelationInfo = {
       name,

@@ -30,6 +30,7 @@ import {
   BUILDER_EVIDENCE,
   emptyScope,
   parseTableExpression,
+  SAME_QUERY_CLOSURES,
   type Scope,
   type TableRef,
 } from './scope.ts';
@@ -224,6 +225,10 @@ function callContext(analyzer: Analyzer, site: CallSite, base: Base): QueryConte
     scope = analyzer.modelScope(model);
   } else {
     scope = analyzer.scopeOfReceiver(site);
+    // A service or action object is no query of its own.
+    if (scope.kind === 'object') {
+      scope = emptyScope();
+    }
     // An unresolvable receiver: builder-only methods still tell it is a query.
     if (scope.kind === 'unknown' && site.kind === 'method') {
       if (rulesFor(TEST_METHODS, method)) {
@@ -302,7 +307,7 @@ function callContext(analyzer: Analyzer, site: CallSite, base: Base): QueryConte
   if (site.close > 0 && (result.kind === 'query' || result.kind === 'model' || result.kind === 'factory')) {
     for (const segment of segmentsAfter(doc, site.close)) {
       const lower = segment.name.toLowerCase();
-      if (/join/.test(lower) || lower === 'from') {
+      if (/join/.test(lower) || lower === 'from' || SAME_QUERY_CLOSURES.has(lower)) {
         const extended = analyzer.applySegment(result, segment);
         if (extended.tables.length >= result.tables.length) {
           result = extended;

@@ -38,8 +38,21 @@ User::query()
     method, or a runtime helper given a class path (`model_class('Lists\Post')` → the nearest
     `…\Models\Lists\Post` of the model's namespace); named arguments too. A relation whose class
     stays unknown (`morphTo`) gives no columns rather than the parent's;
-  - the tables local scopes join: `->withAuthor()` adds what `scopeWithAuthor()` joins, and what
-    the scopes it calls join;
+  - the tables local scopes join and the names they select `as`: `->withAuthor()` adds what
+    `scopeWithAuthor()` joins, and what the scopes it calls join;
+  - **repositories**: a class naming its model (`model()` returning `Post::class`, a class string
+    or a helper's class path; `$this->setModel(...)` in the constructor; `$model = Post::class`) is
+    its model's query — `app(PostRepository::class)->query()`, `->find()`, `->with()` …; its own
+    methods go by their `@return` / return type, `return $this->query()…`, or the model they
+    switch to (`$this->setModel(Comment::class); return $this->createModel();`);
+  - **services and actions**: `$this->posts->query()` through typed and promoted properties,
+    `@var` on properties, and `$this->posts = app(PostRepository::class)` / a typed parameter
+    assigned in a method; methods by their declared return type;
+  - [eloquent-power-joins](https://github.com/kirschbaum-development/eloquent-power-joins):
+    `joinRelationship('posts.comments')` (and the `left`/`right`/`UsingAlias` variants) completes
+    the relation path and adds its tables, the join closure included;
+  - joins made in `when()` / `unless()` / `tap()` closures, and the pivot table of a
+    `belongsToMany` relation's query;
   - variables through assignments, `foreach`, typed parameters, `@var` / `@param` docs, and
     joins added to them in other statements (`$q->leftJoin(...)`);
   - closures of all builder methods: nested `where(fn)` / `when()` (same query), join closures
@@ -63,7 +76,10 @@ User::query()
 - **Diagnostics** warn about unknown tables and columns (only when every table of the query is
   known; subquery aliases, `select … as` aliases, `withCount` columns and raw SQL are respected).
   Migrations are not checked (they name columns that were dropped or renamed since), nor are
-  fragments of concatenations (`$table . '.status'`) or a collection's `join(', ')`.
+  fragments of concatenations (`$table . '.status'`), a collection's `join(', ')`, or attribute
+  names (`setAttribute()`, `isDirty()` … take accessors too). After a method the server does not
+  know (a macro, a builder method of the project), only `table.column` is checked: the method may
+  have selected more.
 - **Fast and cached:** schemas are read with a few `information_schema` / `pg_catalog` queries,
   kept in memory with lookup indexes and cached on disk; a new session answers from the cache
   immediately and refreshes in the background. A change of the migrations table (`php artisan
