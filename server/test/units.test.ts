@@ -8,6 +8,7 @@ import { socketFor } from '../src/db/drivers/mysql.ts';
 import { SchemaIndex, SchemaStore } from '../src/db/schema.ts';
 import type { ConnectionSchema } from '../src/db/types.ts';
 import { plural, tableForForeignKey, tableForModel } from '../src/laravel/inflector.ts';
+import { parseMeta } from '../src/laravel/meta.ts';
 import { parseSettings } from '../src/settings.ts';
 import { columnKey, UsageStore } from '../src/usage.ts';
 import { fakeDrivers, TABLES, table } from './helpers.ts';
@@ -36,6 +37,30 @@ describe('inflector', () => {
     }
     assert.equal(plural('Mouse'), 'Mice');
     assert.equal(tableForForeignKey('parent_category_id'), 'parent_categories');
+  });
+});
+
+describe('PhpStorm metadata', () => {
+  test('map overrides of the first argument: classes and class strings, several per key', () => {
+    const maps = parseMeta(`<?php
+namespace PHPSTORM_META {
+    override(\\app(0), type(0));
+    override(\\app(0), map([
+        '' => '@',
+        'cache' => \\Illuminate\\Cache\\Repository::class,
+        "events" => '\\Illuminate\\Events\\Dispatcher',
+    ]));
+    override(\\Illuminate\\Contracts\\Container\\Container::make(0), map(['cache' => \\A\\Cache::class]));
+    override(\\module_app(0), map([
+        'users' => \\Base\\UserRepository::class,
+        'users' => \\BaseClient\\UserRepository::class,
+    ]));
+}`);
+    assert.deepEqual(maps.get('app')?.get('cache'), ['Illuminate\\Cache\\Repository']);
+    assert.deepEqual(maps.get('app')?.get('events'), ['Illuminate\\Events\\Dispatcher']);
+    assert.equal(maps.get('app')?.has(''), false);
+    assert.deepEqual(maps.get('illuminate\\contracts\\container\\container::make')?.get('cache'), ['A\\Cache']);
+    assert.deepEqual(maps.get('module_app')?.get('users'), ['Base\\UserRepository', 'BaseClient\\UserRepository']);
   });
 });
 

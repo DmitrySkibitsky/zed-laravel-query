@@ -43,7 +43,7 @@ export class Workspace {
     this.settings = settings;
     this.options = options;
     this.cacheDir = projectCacheDir(settings.cacheDirectory ?? defaultCacheBase(), root);
-    this.project = new LaravelProject(root, settings.migrationPaths);
+    this.project = new LaravelProject(root, settings.migrationPaths, settings.metaFiles);
     this.store = new SchemaStore({
       cacheDir: this.cacheDir,
       drivers: options.drivers ?? DRIVERS,
@@ -125,6 +125,7 @@ export class Workspace {
     this.settings = settings;
     this.usage.setHalfLife(settings.usage.halfLifeDays);
     this.project.setMigrationPaths(settings.migrationPaths);
+    this.project.setMetaPaths(settings.metaFiles);
     this.store.watch(settings.watchMigrations);
     if (rediscover) {
       this.ready = this.start();

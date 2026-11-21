@@ -264,6 +264,18 @@ function callContext(analyzer: Analyzer, site: CallSite, base: Base): QueryConte
   if (RELATED_COLUMN_METHODS.has(method) && site.argIndex === 1 && site.arrays.length === 0) {
     kinds = ['column'];
   }
+  // A repository's own `find($id, $with = [])` is not the builder's `find($id, $columns)`: its
+  // parameter names tell what an argument is.
+  if (scope.repository && site.arrays.length <= 1) {
+    const param = analyzer.project?.methodInfo(scope.repository, method)?.params[site.argIndex];
+    if (param !== undefined) {
+      if (/^(with|relations?|load|eager)/i.test(param)) {
+        kinds = ['relation'];
+      } else if (!/(column|field|select|attribute|data|values|input|key)/i.test(param)) {
+        return undefined;
+      }
+    }
+  }
   // A collection's join(', ') glues strings, get('key') / first() take a key or a callback.
   if (scope.collection && (kinds.includes('table') || COLLECTION_NON_COLUMN.has(method))) {
     return undefined;

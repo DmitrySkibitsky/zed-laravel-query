@@ -270,10 +270,13 @@ class ReportService
 
     protected $roles;
 
+    protected $tags;
+
     public function __construct(private PostRepository $posts, RoleRepository $roles)
     {
         $this->users = app(UserRepository::class);
         $this->roles = $roles;
+        $this->tags = module_app('roles');
     }
 
     public function run()
@@ -281,6 +284,7 @@ class ReportService
         $this->posts->query()->where('title');
         $this->users->createModel()->where('email');
         $this->roles->where('slug');
+        $this->tags->where('label');
     }
 }
 `;
@@ -339,6 +343,11 @@ class PostRepository extends BaseRepository
         return $this->createModel();
     }
 
+    public function find($id, $with = [])
+    {
+        return $this->createModel()->with($with)->find($id);
+    }
+
     public function summary()
     {
         return cache()->remember('summary', 60, fn () => []);
@@ -369,6 +378,35 @@ class RoleRepository
 }
 `,
   'app/Services/ReportService.php': REPORT_SERVICE,
+  'app/RepositoriesClient/PostRepository.php': `<?php
+namespace App\\RepositoriesClient;
+
+use App\\Models\\Comment;
+
+class PostRepository extends \\App\\Repositories\\PostRepository
+{
+    public function model(): string
+    {
+        return Comment::class;
+    }
+}
+`,
+  '.phpstorm.meta.php/.phpstorm.meta.php': `<?php
+namespace PHPSTORM_META {
+    override(\\app(0), type(0));
+
+    override(\\app(0), map([
+        'posts.repository' => \\App\\RepositoriesClient\\PostRepository::class,
+        'posts.repository' => \\App\\Repositories\\PostRepository::class,
+    ]));
+
+    override(\\module_app(0), map([
+        'users' => \\Vendor\\Missing\\UserRepository::class,
+        'users' => \\App\\Repositories\\UserRepository::class,
+        'roles' => '\\App\\Repositories\\RoleRepository',
+    ]));
+}
+`,
   'app/Query/GridBuilder.php': `<?php
 namespace App\\Query;
 

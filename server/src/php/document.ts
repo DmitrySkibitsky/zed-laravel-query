@@ -617,3 +617,22 @@ export function literalValue(token: Token | undefined): string | undefined {
   }
   return token.value;
 }
+
+/** `DB::raw(...)` / `->raw(...)` in (open, close) whose SQL is not a plain string. */
+export function hasComputedRaw(doc: PhpDocument, open: number, close: number): boolean {
+  for (let i = open + 1; i < close; i++) {
+    const token = doc.tok(i);
+    if (
+      token?.type === 'ident' &&
+      token.value.toLowerCase() === 'raw' &&
+      doc.isOp(i - 1, '::', '->') &&
+      doc.isOp(i + 1, '(')
+    ) {
+      const end = doc.match[i + 1];
+      if (end !== i + 3 || literalValue(doc.tok(i + 2)) === undefined) {
+        return true;
+      }
+    }
+  }
+  return false;
+}

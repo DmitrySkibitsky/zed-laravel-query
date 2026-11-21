@@ -48,6 +48,11 @@ User::query()
   - **services and actions**: `$this->posts->query()` through typed and promoted properties,
     `@var` on properties, and `$this->posts = app(PostRepository::class)` / a typed parameter
     assigned in a method; methods by their declared return type;
+  - **container keys** by the PhpStorm metadata (`.phpstorm.meta.php`, written by
+    `php artisan ide-helper:meta`): `app('payments')`, `app()->make('payments')` and a project's own
+    helpers (`module_app('users')->createModel()`) resolve to the class the metadata maps the key
+    to. When several modules bind one key, the class found in the project with the shortest root
+    namespace wins (the base module over its client-specific variants);
   - [eloquent-power-joins](https://github.com/kirschbaum-development/eloquent-power-joins):
     `joinRelationship('posts.comments')` (and the `left`/`right`/`UsingAlias` variants) completes
     the relation path and adds its tables, the join closure included;
@@ -174,6 +179,7 @@ All optional, under `lsp.laravel-query.settings` (project `.zed/settings.json` o
   "refreshOnStartup": true, // re-read the schema in the background at startup
   "watchMigrations": 30, // seconds between checks of the migrations table; 0 = off
   "migrationPaths": ["database/migrations"],
+  "metaFiles": [".phpstorm.meta.php"], // PhpStorm metadata, files or directories: container keys → classes
   "diagnostics": { "enabled": true, "severity": "warning", "unknownTables": true, "unknownColumns": true },
   "completion": {
     "maxItems": 400, // upper bound of one response

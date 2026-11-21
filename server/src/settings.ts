@@ -34,6 +34,8 @@ export interface Settings {
   /** Seconds between checks of the migrations table; a change re-reads the schema. 0 = off. */
   watchMigrations: number;
   migrationPaths: string[];
+  /** PhpStorm metadata (files or directories): the classes `app('key')` and container helpers return. */
+  metaFiles: string[];
   diagnostics: { enabled: boolean; severity: Severity; unknownTables: boolean; unknownColumns: boolean };
   completion: {
     /** Upper bound for the items of one response. */
@@ -58,6 +60,7 @@ export const DEFAULT_SETTINGS: Settings = {
   refreshOnStartup: true,
   watchMigrations: 30,
   migrationPaths: ['database/migrations'],
+  metaFiles: ['.phpstorm.meta.php'],
   diagnostics: { enabled: true, severity: 'warning', unknownTables: true, unknownColumns: true },
   completion: {
     maxItems: 400,
@@ -129,6 +132,7 @@ export function parseSettings(input: unknown): Settings {
     refreshOnStartup: bool(raw.refreshOnStartup, d.refreshOnStartup),
     watchMigrations: num(raw.watchMigrations, d.watchMigrations),
     migrationPaths: strings(raw.migrationPaths, d.migrationPaths),
+    metaFiles: strings(raw.metaFiles, d.metaFiles),
     diagnostics: {
       enabled: bool(diagnostics.enabled, d.diagnostics.enabled),
       severity,
