@@ -30,8 +30,16 @@ User::query()
 - **The query's tables come first.** The server follows the builder chain to its root and
   collects every table the query touches:
   - roots: the `DB` facade (with `connection()`), model classes (`$table`, `$connection`,
-    `#[Table]`, the name convention, parent classes and traits), `$this` and typed `Builder`
-    parameters in models (scopes), relations (`$user->posts()`);
+    `#[Table]`, the name convention, parent classes and traits), `$this` and the first parameter
+    of local scopes (`scopeActive($query)`, typed or not), project builders (`class GridBuilder
+    extends Builder`), relations (`$user->posts()`);
+  - related classes however the relation names them: `Post::class`, a class string, a property
+    (`static::$postModel`, late bound, so a child model's value wins), a variable assigned in the
+    method, or a runtime helper given a class path (`model_class('Lists\Post')` → the nearest
+    `…\Models\Lists\Post` of the model's namespace); named arguments too. A relation whose class
+    stays unknown (`morphTo`) gives no columns rather than the parent's;
+  - the tables local scopes join: `->withAuthor()` adds what `scopeWithAuthor()` joins, and what
+    the scopes it calls join;
   - variables through assignments, `foreach`, typed parameters, `@var` / `@param` docs, and
     joins added to them in other statements (`$q->leftJoin(...)`);
   - closures of all builder methods: nested `where(fn)` / `when()` (same query), join closures
@@ -54,6 +62,8 @@ User::query()
   and migrations, a column's migration line, a relation's method.
 - **Diagnostics** warn about unknown tables and columns (only when every table of the query is
   known; subquery aliases, `select … as` aliases, `withCount` columns and raw SQL are respected).
+  Migrations are not checked (they name columns that were dropped or renamed since), nor are
+  fragments of concatenations (`$table . '.status'`) or a collection's `join(', ')`.
 - **Fast and cached:** schemas are read with a few `information_schema` / `pg_catalog` queries,
   kept in memory with lookup indexes and cached on disk; a new session answers from the cache
   immediately and refreshes in the background. A change of the migrations table (`php artisan

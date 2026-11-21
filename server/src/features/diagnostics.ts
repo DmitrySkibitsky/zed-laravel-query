@@ -32,6 +32,11 @@ export function diagnose(
     return [];
   }
   const doc = analyzer.doc;
+  // Migrations are the schema's history: they name columns and tables that were since dropped or
+  // renamed, and ones created a few lines above. Checking them against today's schema is noise.
+  if (doc.classes.some((c) => /(^|\\)Migration$/i.test(c.extends ?? ''))) {
+    return [];
+  }
   const out: Diagnostic[] = [];
   const severity = SEVERITY[settings.diagnostics.severity];
   for (let i = 0; i < doc.length; i++) {

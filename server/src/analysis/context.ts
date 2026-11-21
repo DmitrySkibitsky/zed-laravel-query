@@ -34,6 +34,9 @@ import {
   type TableRef,
 } from './scope.ts';
 
+/** Builder methods whose first argument means something else on a collection. */
+const COLLECTION_NON_COLUMN = new Set(['get', 'first', 'firstorfail']);
+
 export type ContextKind = 'column' | 'table' | 'relation' | 'connection' | 'index' | 'operator';
 
 export interface QueryContext {
@@ -67,7 +70,8 @@ export function contextAt(analyzer: Analyzer, tokenIndex: number): QueryContext 
   if (rule) {
     return rule;
   }
-  if (token.interpolated) {
+  // `$table . '.status'`: a fragment of a concatenation is not a whole name.
+  if (token.interpolated || doc.isOp(tokenIndex - 1, '.') || doc.isOp(tokenIndex + 1, '.')) {
     return undefined;
   }
   const site = siteOf(doc, tokenIndex);
@@ -254,6 +258,10 @@ function callContext(analyzer: Analyzer, site: CallSite, base: Base): QueryConte
   let kinds = filterByPosition(kindsAt(rules, site.argIndex), site);
   if (RELATED_COLUMN_METHODS.has(method) && site.argIndex === 1 && site.arrays.length === 0) {
     kinds = ['column'];
+  }
+  // A collection's join(', ') glues strings, get('key') / first() take a key or a callback.
+  if (scope.collection && (kinds.includes('table') || COLLECTION_NON_COLUMN.has(method))) {
+    return undefined;
   }
   if (kinds.length === 0) {
     return undefined;
