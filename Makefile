@@ -7,6 +7,7 @@
 #   make test-db          driver tests against real databases (LQ_TEST_MYSQL / LQ_TEST_MARIADB / LQ_TEST_PGSQL)
 #   make db-up / db-down  start / stop MySQL, MariaDB and PostgreSQL containers for test-db (docker)
 #   make bench            completion latency on a real project (see server/bench/completion.bench.ts)
+#   make coverage         what resolves on a real project (see server/bench/coverage.ts)
 #   make build            server bundle (the release asset) + extension wasm
 #   make check            everything CI runs: lint and test
 #   make version VERSION=x.y.z   set the release version in every file (see CONTRIBUTING.md)
@@ -22,7 +23,7 @@ LQ_TEST_PGSQL ?= postgres://postgres:postgres@127.0.0.1:55432/postgres
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup fmt lint lint-rust lint-server lint-nix version-check version test test-rust test-server test-db db-up db-down bench build server wasm check clean
+.PHONY: help setup fmt lint lint-rust lint-server lint-nix version-check version test test-rust test-server test-db db-up db-down bench coverage build server wasm check clean
 
 # `make` alone prints the list above instead of running the first target.
 help:
@@ -81,6 +82,9 @@ db-down:
 
 bench:
 	cd $(SERVER) && npm run bench
+
+coverage:
+	cd $(SERVER) && npm run coverage
 
 # server/dist/laravel-query-server.cjs: attached to the GitHub release by .github/workflows/release.yml
 server:
