@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import type { CompletionItem } from 'vscode-languageserver/node';
-import { createHarness, type Harness, LEGACY_ACCOUNT, LEGACY_FILES, php } from './helpers.ts';
+import { createHarness, type Harness, LEGACY_ACCOUNT, LEGACY_FILES, php, REPORT_SERVICE } from './helpers.ts';
 
 let h: Harness;
 before(async () => {
@@ -514,6 +514,40 @@ describe('long-lived codebases', () => {
     assert.ok(result.includes('title'), result.join(', '));
   });
 
+  test("joins of a variable in other statements, not of a closure's own variable of the same name", async () => {
+    const result = await legacy.labels(
+      php(
+        `$query = Post::query();\n$query->whereNotExists(function ($query) { $query->from('roles')->join('profiles', 'a', '=', 'b'); });\n$query->where('‸');`,
+      ),
+    );
+    assert.ok(result.includes('title') && !result.includes('slug') && !result.includes('avatar'), result.join(', '));
+  });
+
+  test("a belongsToMany relation's query has its pivot table", async () => {
+    assert.ok((await legacy.labels(php(`$user->roles()->where('‸');`))).includes('assigned_at'));
+    const closure = await legacy.labels(php(`User::whereHas('roles', fn ($q) => $q->where('‸'));`));
+    assert.ok(closure.includes('slug') && closure.includes('assigned_at'), closure.join(', '));
+  });
+
+  test('joins made in when() closures are part of the query', async () => {
+    const result = await legacy.labels(
+      php(
+        `User::query()->when($x, function ($query) { $query->leftJoin('posts', 'posts.user_id', '=', 'users.id'); })->where('‸');`,
+      ),
+    );
+    assert.ok(result.includes('name') && result.includes('posts.title'), result.join(', '));
+    const before = await legacy.labels(
+      php(
+        `User::select('‸')->when($x, function ($query) { $query->leftJoin('posts', 'posts.user_id', '=', 'users.id'); });`,
+      ),
+    );
+    assert.ok(before.includes('posts.title'), 'written after the cursor');
+    const statements = await legacy.labels(
+      php(`$query = User::query();\n$query->joinRelationship('posts');\n$query->where('‸');`),
+    );
+    assert.ok(statements.includes('posts.title'), 'power joins in other statements');
+  });
+
   test('a bare builder @var does not hide what the assignment resolves to', async () => {
     const result = await legacy.labels(
       php(
@@ -528,6 +562,46 @@ describe('long-lived codebases', () => {
       php(`$repository->query()->leftJoin('posts', function ($join) { $join->on('‸'); });`),
     );
     assert.ok(result.some((l) => l === 'title' || l === 'posts.title'));
+  });
+
+  test('repositories: the model of model(), setModel() or $model; own methods by their return type', async () => {
+    const repo = (cls: string, chain: string) =>
+      legacy.labels(php(`app(\\App\\Repositories\\${cls}::class)${chain}->where('‸');`));
+    assert.ok((await repo('PostRepository', '->query()')).includes('title'), 'model()');
+    assert.ok((await repo('PostRepository', '')).includes('title'), 'forwarded to the model');
+    assert.ok((await repo('PostRepository', '->grid()')).includes('title'), '@return');
+    assert.ok((await repo('PostRepository', '->published()')).includes('title'), 'return $this->query()…');
+    assert.ok((await repo('UserRepository', '->createModel()')).includes('email'), 'setModel(helper)');
+    assert.ok((await repo('RoleRepository', '->newQuery()')).includes('slug'), '$model = Role::class');
+    assert.deepEqual(await repo('PostRepository', '->count()'), [], 'declared non-model result');
+    assert.ok((await repo('PostRepository', '->commentsGrid()')).includes('content'), 'setModel() in the method');
+    assert.deepEqual(await repo('PostRepository', '->summary()'), [], 'an own method with an unknown result');
+  });
+
+  test('repositories through typed parameters and properties', async () => {
+    const typed = await legacy.labels(
+      php(`$f = function (\\App\\Repositories\\PostRepository $repo) { $repo->query()->where('‸'); };`),
+    );
+    assert.ok(typed.includes('title'), 'typed parameter');
+    const file = 'app/Services/ReportService.php';
+    const at = (value: string) => legacy.labels(REPORT_SERVICE.replace(`'${value}'`, "'‸'"), file);
+    assert.ok((await at('title')).includes('title'), 'promoted constructor property');
+    assert.ok((await at('email')).includes('email'), '@var property assigned app(X::class)');
+    assert.ok((await at('slug')).includes('slug'), 'property assigned a typed parameter');
+    legacy.close(file);
+  });
+
+  test('eloquent-power-joins: relation names, the tables along the path, the join closure', async () => {
+    assert.ok((await legacy.labels(php(`User::joinRelationship('‸');`))).includes('posts'));
+    const joined = await legacy.labels(php(`User::joinRelationship('posts.comments')->where('‸');`));
+    assert.ok(joined.includes('name') && joined.includes('posts.title') && joined.includes('comments.content'));
+    const aliased = await legacy.labels(php(`User::leftJoinRelationshipUsingAlias('posts', 'p')->where('p.‸');`));
+    assert.ok(aliased.includes('p.title'), aliased.join(', '));
+    const closure = await legacy.labels(
+      php(`User::joinRelationship('posts', function ($join) { $join->where('‸'); });`),
+    );
+    assert.equal(closure[0], 'id');
+    assert.ok(closure.includes('title') || closure.includes('posts.title'), closure.join(', '));
   });
 
   test("a collection's join() is not a table", async () => {

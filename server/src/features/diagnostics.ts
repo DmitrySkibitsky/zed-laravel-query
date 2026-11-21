@@ -9,6 +9,7 @@ import { contextAt, type QueryContext, scalarPropertyContext } from '../analysis
 import type { Analyzer } from '../analysis/scope.ts';
 import { parseTableExpression } from '../analysis/scope.ts';
 import type { SchemaStore } from '../db/schema.ts';
+import { ATTRIBUTE_METHODS } from '../laravel/methods.ts';
 import type { Settings } from '../settings.ts';
 import { type Target, targetOf } from './hover.ts';
 import { columnPart, findColumn, findTable, indexFor, resolveTables } from './resolve.ts';
@@ -46,6 +47,10 @@ export function diagnose(
     }
     const context = contextAt(analyzer, i) ?? scalarPropertyContext(analyzer, i);
     if (!context || context.newColumn) {
+      continue;
+    }
+    // `$user->setAttribute('full_name', ...)`: attributes include accessors and appended ones.
+    if (context.site?.type === 'call' && ATTRIBUTE_METHODS.has(context.site.name.toLowerCase())) {
       continue;
     }
     for (const target of targetsOf(context)) {
@@ -117,6 +122,7 @@ export function diagnose(
           // A bare column needs every table of the query: not for inferred queries or guessed models.
           const uncertain =
             scope.inferred ||
+            scope.partial ||
             scope.tables.length === 0 ||
             scope.tables.some((t) => t.origin === 'guess' || t.origin === 'mentioned');
           const unique = scope.tables.filter(

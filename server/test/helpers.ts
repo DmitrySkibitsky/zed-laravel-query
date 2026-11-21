@@ -243,9 +243,44 @@ class Account extends Model
         $query->leftJoin('posts', 'posts.user_id', '=', 'users.id');
     }
 
+    public function scopeWithPostCount($query)
+    {
+        $query->selectRaw('(select count(*) from posts where posts.user_id = users.id) as post_count');
+    }
+
     public function scopeWithPostComments($query)
     {
         return $query->withPosts()->leftJoin('comments as c', 'c.post_id', '=', 'posts.id');
+    }
+}
+`;
+
+/** A service reaching repositories through promoted, documented and assigned properties. */
+export const REPORT_SERVICE = `<?php
+namespace App\\Services;
+
+use App\\Repositories\\PostRepository;
+use App\\Repositories\\RoleRepository;
+use App\\Repositories\\UserRepository;
+
+class ReportService
+{
+    /** @var UserRepository */
+    protected $users;
+
+    protected $roles;
+
+    public function __construct(private PostRepository $posts, RoleRepository $roles)
+    {
+        $this->users = app(UserRepository::class);
+        $this->roles = $roles;
+    }
+
+    public function run()
+    {
+        $this->posts->query()->where('title');
+        $this->users->createModel()->where('email');
+        $this->roles->where('slug');
     }
 }
 `;
@@ -260,6 +295,80 @@ class ArchivedAccount extends Account
     protected static $postModel = 'App\\Models\\Comment';
 }
 `,
+  'app/Repositories/BaseRepository.php': `<?php
+namespace App\\Repositories;
+
+abstract class BaseRepository
+{
+    abstract public function model();
+
+    public function count(): int
+    {
+        return 0;
+    }
+}
+`,
+  'app/Repositories/PostRepository.php': `<?php
+namespace App\\Repositories;
+
+use App\\Models\\Post;
+use Illuminate\\Database\\Eloquent\\Model;
+
+class PostRepository extends BaseRepository
+{
+    public function model(): string
+    {
+        return Post::class;
+    }
+
+    /** @return Post|Model */
+    public function grid()
+    {
+        return $this->makeModel();
+    }
+
+    public function published()
+    {
+        return $this->query()->whereNotNull('published_at');
+    }
+
+    public function commentsGrid()
+    {
+        $this->setModel(\\App\\Models\\Comment::class);
+
+        return $this->createModel();
+    }
+
+    public function summary()
+    {
+        return cache()->remember('summary', 60, fn () => []);
+    }
+}
+`,
+  'app/Repositories/UserRepository.php': `<?php
+namespace App\\Repositories;
+
+class UserRepository
+{
+    protected $model;
+
+    public function __construct()
+    {
+        $this->setModel(model_class('User'));
+    }
+}
+`,
+  'app/Repositories/RoleRepository.php': `<?php
+namespace App\\Repositories;
+
+use App\\Models\\Role;
+
+class RoleRepository
+{
+    protected $model = Role::class;
+}
+`,
+  'app/Services/ReportService.php': REPORT_SERVICE,
   'app/Query/GridBuilder.php': `<?php
 namespace App\\Query;
 
