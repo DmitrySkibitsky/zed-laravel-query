@@ -189,6 +189,86 @@ return new class extends Migration {
 `,
 };
 
+/**
+ * Models written the way long-lived codebases do: related classes in static properties (late
+ * static binding) or given to a runtime helper by a relative class path, named arguments,
+ * untyped local scopes, and a project query builder.
+ */
+export const LEGACY_ACCOUNT = `<?php
+namespace App\\Models\\Legacy;
+
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Relations\\BelongsToMany;
+
+class Account extends Model
+{
+    protected $table = 'users';
+
+    protected static $postModel = 'App\\Models\\Post';
+
+    public function posts()
+    {
+        return $this->hasMany(static::$postModel, 'user_id');
+    }
+
+    public function roles(): BelongsToMany
+    {
+        return $this->belongsToMany(model_class('Role'), 'role_user', 'user_id', 'role_id');
+    }
+
+    public function profile()
+    {
+        return $this->hasOne(related: model_class('Profile'), foreignKey: 'user_id');
+    }
+
+    public function owner()
+    {
+        return $this->morphTo();
+    }
+
+    public function latestComment()
+    {
+        $commentModel = model_class('Comment');
+
+        return $this->hasOne($commentModel, 'user_id');
+    }
+
+    public function scopeVisible($query)
+    {
+        $query->whereNotNull('email');
+    }
+
+    public function scopeWithPosts($query)
+    {
+        $query->leftJoin('posts', 'posts.user_id', '=', 'users.id');
+    }
+
+    public function scopeWithPostComments($query)
+    {
+        return $query->withPosts()->leftJoin('comments as c', 'c.post_id', '=', 'posts.id');
+    }
+}
+`;
+
+export const LEGACY_FILES: Record<string, string> = {
+  'app/Models/Legacy/Account.php': LEGACY_ACCOUNT,
+  'app/Models/Legacy/ArchivedAccount.php': `<?php
+namespace App\\Models\\Legacy;
+
+class ArchivedAccount extends Account
+{
+    protected static $postModel = 'App\\Models\\Comment';
+}
+`,
+  'app/Query/GridBuilder.php': `<?php
+namespace App\\Query;
+
+use Illuminate\\Database\\Query\\Builder;
+
+class GridBuilder extends Builder {}
+`,
+};
+
 export function createProject(files: Record<string, string> = {}): FixtureProject {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'laravel-query-'));
   const write = (relative: string, content: string) => {

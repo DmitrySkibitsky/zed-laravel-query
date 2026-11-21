@@ -81,6 +81,14 @@ export function parseTableExpression(value: string): { name: string; alias?: str
 const BUILDER_TYPES =
   /(^|\\|\|)(Builder|EloquentBuilder|QueryBuilder|JoinClause|Relation|HasMany|HasOne|BelongsTo|BelongsToMany|MorphMany|MorphOne|MorphTo|MorphToMany|HasManyThrough|HasOneThrough)(<|$|\|)/;
 const BLUEPRINT_TYPE = /(^|\\)Blueprint$/;
+/** Base classes of a project's own builders (`class GridQueryBuilder extends Builder`). */
+const BUILDER_BASES = new Set(
+  [
+    'Illuminate\\Database\\Query\\Builder',
+    'Illuminate\\Database\\Eloquent\\Builder',
+    'Illuminate\\Database\\Eloquent\\Relations\\Relation',
+  ].map((c) => c.toLowerCase()),
+);
 const JOIN_METHODS = new Set([
   'join',
   'leftjoin',
@@ -424,6 +432,7 @@ export class Analyzer {
         explicitTable: false,
         primaryKey: 'id',
         relations: new Map(),
+        scopes: new Map(),
       };
       return this.modelScope(guessed, 'guess');
     }
@@ -595,9 +604,36 @@ export class Analyzer {
           }
           return next;
         }
+        // A relation to a class we cannot name (morphTo, a runtime-computed class): its query is
+        // on another table, so the parent's columns would be wrong.
+        return emptyScope();
+      }
+    }
+    // A local scope: `->withAuthors()` brings the tables its body joins.
+    if (scope.model) {
+      const joins = this.scopeJoins(scope.model, name, new Set());
+      if (joins.length > 0) {
+        const next = cloneScope(scope);
+        for (const join of joins) {
+          const parsed = parseTableExpression(join);
+          if (!next.tables.some((t) => t.name === parsed.name && t.alias === parsed.alias)) {
+            next.tables.push({ name: parsed.name, alias: parsed.alias, origin: 'join' });
+          }
+        }
+        return next;
       }
     }
     return scope;
+  }
+
+  /** Tables a local scope joins, with those of the scopes it calls. */
+  private scopeJoins(model: ModelInfo, name: string, seen: Set<string>): string[] {
+    const local = model.scopes.get(name);
+    if (!local || seen.has(name)) {
+      return [];
+    }
+    seen.add(name);
+    return [...local.joins, ...local.calls.flatMap((call) => this.scopeJoins(model, call, seen))];
   }
 
   /** `'col as alias'`, `['alias' => sub]`, `selectRaw('count(*) as total')`. */
@@ -693,8 +729,10 @@ export class Analyzer {
     const assigned = this.lastAssignment(name, start, at, fn);
     // Docs from the token before the assignment: the doc block of its statement and later ones.
     const declared = this.declaredScope(name, assigned ? Math.max(start, assigned.tok - 1) : start, at);
-    if (declared) {
-      return declared;
+    // A doc naming a model wins; a bare builder type (`@var Builder $query`) says less than a
+    // right-hand side that resolves (`Member::query()->join(...)`).
+    if (declared?.namesModel || (declared && !assigned)) {
+      return declared.scope;
     }
     if (!assigned) {
       return undefined;
@@ -703,7 +741,11 @@ export class Analyzer {
     if (scope.tables.length > 0 || scope.model || (scope.kind !== 'unknown' && !scope.inferred)) {
       return scope;
     }
-    return (assigned.tok - 1 > start ? this.declaredScope(name, start, assigned.tok - 1) : undefined) ?? scope;
+    return (
+      declared?.scope ??
+      (assigned.tok - 1 > start ? this.declaredScope(name, start, assigned.tok - 1)?.scope : undefined) ??
+      scope
+    );
   }
 
   private lastAssignment(
@@ -749,14 +791,17 @@ export class Analyzer {
   }
 
   /** The type of the last `/** @var User $user *\/` for `$name` within the token range [from, to]. */
-  private declaredScope(name: string, from: number, to: number): Scope | undefined {
+  private declaredScope(name: string, from: number, to: number): { scope: Scope; namesModel: boolean } | undefined {
     const docs = this.doc.docsBetween(from, to);
     for (let d = docs.length - 1; d >= 0; d--) {
       const type = docType(docs[d].value, '@var', name);
       if (type) {
         const scope = this.scopeOfType(type, to);
         if (scope) {
-          return scope;
+          const namesModel = type
+            .split(/[|<>,\s]+/)
+            .some((part) => !!part && !!this.model(this.resolveClassName(part.replace(/^\?|\[\]$/g, ''), to)));
+          return { scope, namesModel };
         }
       }
     }
@@ -846,6 +891,7 @@ export class Analyzer {
         return this.modelScope(model);
       }
     }
+    let builder = BUILDER_TYPES.test(cleaned);
     for (const part of cleaned.split('|')) {
       const name = part.replace(/<.*$/, '').replace(/\[\]$/, '').trim();
       if (!name || /^(null|array|int|string|mixed|bool|void|static|self|callable)$/i.test(name)) {
@@ -855,7 +901,8 @@ export class Analyzer {
         const scope = emptyScope('blueprint');
         return scope;
       }
-      const model = this.model(this.resolveClassName(name, at));
+      const fqn = this.resolveClassName(name, at);
+      const model = this.model(fqn);
       if (model) {
         const scope = this.modelScope(model);
         if (part.endsWith('[]') || /Collection/.test(cleaned)) {
@@ -863,15 +910,17 @@ export class Analyzer {
         }
         return scope;
       }
+      builder ||= this.project?.extendsAny(fqn, BUILDER_BASES) ?? false;
     }
-    if (BUILDER_TYPES.test(cleaned)) {
+    if (builder) {
       // A builder of unknown tables; inside a model it is the model's own query (scopes).
       const decl = this.doc.enclosingClass(at);
       const model = decl?.fqn ? this.model(decl.fqn) : undefined;
       if (model) {
         return this.modelScope(model);
       }
-      return emptyScope('query');
+      // Its tables come from its joins and the qualifiers its strings name.
+      return { ...emptyScope('query'), inferred: true };
     }
     return undefined;
   }
@@ -890,6 +939,14 @@ export class Analyzer {
         if (scope) {
           return scope;
         }
+      }
+    }
+    // `public function scopeActive($query)`: a local scope's first parameter is the model's builder.
+    if (fn.kind === 'method' && fn.params[0] === param && /^scope[A-Z_]/.test(fn.name ?? '')) {
+      const decl = this.doc.enclosingClass(param.tok);
+      const model = decl?.fqn ? this.model(decl.fqn) : undefined;
+      if (model) {
+        return this.modelScope(model);
       }
     }
     return emptyScope();
@@ -918,11 +975,22 @@ export class Analyzer {
       }
       return scope;
     }
+    const kind = closureKind(method);
+    if (outer.kind === 'unknown' && kind === 'join' && site.argIndex === 1 && paramIndex === 0) {
+      // `$repository->query()->leftJoin('posts', function ($join) {...})`: the joined table is known
+      // even when the outer query is not.
+      const table = this.literalArg(args[0]);
+      if (table) {
+        const parsed = parseTableExpression(table);
+        const scope: Scope = { ...emptyScope('query'), inferred: true };
+        scope.tables.push({ name: parsed.name, alias: parsed.alias, origin: 'join' });
+        return scope;
+      }
+    }
     if (outer.kind === 'db' || outer.kind === 'test' || outer.kind === 'unknown' || outer.kind === 'blueprint') {
       return typed && typed.kind !== 'blueprint' ? typed : undefined;
     }
 
-    const kind = closureKind(method);
     const firstArgIsClosure = site.argIndex === 0 && site.arrays.length === 0;
     if (kind === 'nested' && firstArgIsClosure && paramIndex === 0) {
       return cloneScope(outer);

@@ -6,7 +6,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type ClassDecl, literalValue, PhpDocument } from '../php/document.ts';
+import { type ClassDecl, type FunctionDecl, literalValue, PhpDocument } from '../php/document.ts';
 import { tableForModel } from './inflector.ts';
 import { RELATION_TYPES } from './methods.ts';
 
@@ -16,12 +16,26 @@ export interface RelationInfo {
   type: string;
   /** Related model class. */
   related?: string;
+  /**
+   * The related class when the definition does not name it directly, resolved per model (late
+   * static binding): a property holding the class (`static::$postModel`, `$this->postModel`), or a
+   * class path relative to a namespace given to a helper (`model_class('Lists\Post')`).
+   */
+  relatedRef?: { property?: string; hint?: string; definedIn: string };
   /** Intermediate model of has*Through. */
   through?: string;
   /** belongsToMany / morphToMany pivot table when given. */
   pivotTable?: string;
   /** String literal arguments by position (undefined for non-literals). */
   args: Array<string | undefined>;
+}
+
+/** What a local scope (`scopePublished($query)`) does to its query that later clauses rely on. */
+export interface LocalScope {
+  /** Tables it joins, as written (`posts as p`). */
+  joins: string[];
+  /** Other methods it calls on the query (lower-cased): scopes it builds on. */
+  calls: string[];
 }
 
 export interface ModelInfo {
@@ -35,6 +49,8 @@ export interface ModelInfo {
   connection?: string;
   primaryKey: string;
   relations: Map<string, RelationInfo>;
+  /** Local scopes by lower-cased name without the prefix (`scopePublished` → `published`). */
+  scopes: Map<string, LocalScope>;
 }
 
 interface ClassInfo {
@@ -50,6 +66,7 @@ interface ClassInfo {
   tableAttribute?: string;
   connectionAttribute?: string;
   relations: Map<string, RelationInfo>;
+  scopes: Map<string, LocalScope>;
 }
 
 const MODEL_BASES = new Set(
@@ -333,30 +350,57 @@ export class LaravelProject {
     let connection: string | undefined;
     let primaryKey: string | undefined;
     const relations = new Map<string, RelationInfo>();
+    const scopes = new Map<string, LocalScope>();
     const own = this.classInfo(fqn);
+    /** The class and its ancestors and traits, nearest first: where properties are looked up. */
+    const lineage: ClassInfo[] = [];
     let current: string | undefined = fqn;
     for (let depth = 0; current && depth < 12; depth++) {
       const info = this.classInfo(current);
       if (!info) {
         break;
       }
+      lineage.push(info);
       table ??= info.tableAttribute ?? info.properties.get('$table');
       connection ??= info.connectionAttribute ?? info.properties.get('$connection');
       primaryKey ??= info.properties.get('$primaryKey');
-      for (const [name, relation] of info.relations) {
-        if (!relations.has(name)) {
-          relations.set(name, relation);
-        }
-      }
-      for (const trait of info.traits) {
-        const traitInfo = this.classInfo(trait);
-        for (const [name, relation] of traitInfo?.relations ?? []) {
+      const traits = info.traits.map((trait) => this.classInfo(trait)).filter((c): c is ClassInfo => !!c);
+      lineage.push(...traits);
+      for (const source of [info, ...traits]) {
+        for (const [name, relation] of source.relations) {
           if (!relations.has(name)) {
             relations.set(name, relation);
           }
         }
+        for (const [name, scope] of source.scopes) {
+          if (!scopes.has(name)) {
+            scopes.set(name, scope);
+          }
+        }
       }
       current = info.extends;
+    }
+    for (const [name, relation] of relations) {
+      const ref = relation.relatedRef;
+      if (relation.related || !ref) {
+        continue;
+      }
+      let related: string | undefined;
+      if (ref.property) {
+        // `static::$postModel` binds late: this model's own value wins over its parents'.
+        for (const info of lineage) {
+          const value = info.classProperties.get(ref.property) ?? info.properties.get(ref.property);
+          if (value) {
+            related = value.replace(/^\\/, '');
+            break;
+          }
+        }
+      } else if (ref.hint) {
+        related = this.resolveClassHint(ref.hint, ref.definedIn);
+      }
+      if (related) {
+        relations.set(name, { ...relation, related });
+      }
     }
     return {
       fqn,
@@ -367,7 +411,36 @@ export class LaravelProject {
       connection,
       primaryKey: primaryKey ?? 'id',
       relations,
+      scopes,
     };
+  }
+
+  /**
+   * A model named by a class path relative to a namespace, as runtime helpers take it
+   * (`model_class('Lists\Post')`): the nearest `<namespace>\<path>` or `<namespace>\Models\<path>`
+   * going up from the namespace of `near`.
+   */
+  resolveClassHint(hint: string, near: string): string | undefined {
+    const name = hint.replace(/^\\/, '');
+    if (!/^[A-Za-z_]\w*(\\[A-Za-z_]\w*)*$/.test(name)) {
+      return undefined;
+    }
+    const parts = near.replace(/^\\/, '').split('\\').slice(0, -1);
+    for (let n = parts.length; n >= 1; n--) {
+      const prefix = parts.slice(0, n).join('\\');
+      for (const candidate of [`${prefix}\\${name}`, `${prefix}\\Models\\${name}`]) {
+        if (this.classFile(candidate) && this.isModel(candidate)) {
+          return candidate;
+        }
+      }
+    }
+    return this.classFile(name) && this.isModel(name) ? name : undefined;
+  }
+
+  /** Whether `fqn` is, or extends, one of `bases` (lower-cased FQNs). */
+  extendsAny(fqn: string, bases: Set<string>): boolean {
+    const key = fqn.replace(/^\\/, '').toLowerCase();
+    return bases.has(key) || this.ancestors(fqn).some((c) => bases.has(c.replace(/^\\/, '')));
   }
 
   /** Model of a factory class: `$model` or the naming convention. */
@@ -646,6 +719,7 @@ function classInfoOf(file: string, document: PhpDocument, decl: ClassDecl, fqn: 
     properties: new Map(),
     classProperties: new Map(),
     relations: new Map(),
+    scopes: new Map(),
   };
 
   // Attributes before the class: #[Table('name', key: 'uuid')], #[Connection('name')]
@@ -704,16 +778,50 @@ function classInfoOf(file: string, document: PhpDocument, decl: ClassDecl, fqn: 
     if (fn.kind !== 'method' || !fn.name || fn.bodyStart < decl.open || fn.bodyEnd > decl.close) {
       continue;
     }
-    const relation = relationOf(document, fn.bodyStart, fn.bodyEnd, fn.name);
+    const relation = relationOf(document, fn.bodyStart, fn.bodyEnd, fn.name, info.fqn);
     if (relation) {
       info.relations.set(fn.name.toLowerCase(), relation);
+    }
+    const scopeName = /^scope([A-Z_]\w*)$/.exec(fn.name)?.[1];
+    if (scopeName) {
+      info.scopes.set(scopeName.toLowerCase(), localScopeOf(document, fn));
     }
   }
   return info;
 }
 
+const JOINS = new Set(['join', 'leftjoin', 'rightjoin', 'crossjoin', 'joinwhere', 'leftjoinwhere', 'rightjoinwhere']);
+
+/** Joins and method calls in a local scope's own body (not in closures it passes on). */
+function localScopeOf(document: PhpDocument, fn: FunctionDecl): LocalScope {
+  const t = document.tokens;
+  const scope: LocalScope = { joins: [], calls: [] };
+  for (let j = fn.bodyStart; j < fn.bodyEnd; j++) {
+    if (!document.isOp(j, '->') || t[j + 1]?.type !== 'ident' || !document.isOp(j + 2, '(')) {
+      continue;
+    }
+    if (document.enclosingFunctions(j)[0] !== fn) {
+      continue;
+    }
+    const method = t[j + 1].value.toLowerCase();
+    const table = JOINS.has(method) ? literalValue(t[j + 3]) : undefined;
+    if (table) {
+      scope.joins.push(table);
+    } else if (!JOINS.has(method)) {
+      scope.calls.push(method);
+    }
+  }
+  return scope;
+}
+
 /** `return $this->hasMany(Post::class, 'user_id')` inside a method body. */
-function relationOf(document: PhpDocument, from: number, to: number, name: string): RelationInfo | undefined {
+function relationOf(
+  document: PhpDocument,
+  from: number,
+  to: number,
+  name: string,
+  definedIn: string,
+): RelationInfo | undefined {
   const t = document.tokens;
   for (let i = from; i < to; i++) {
     if (!(t[i].type === 'var' && t[i].value === '$this' && document.isOp(i + 1, '->'))) {
@@ -725,28 +833,60 @@ function relationOf(document: PhpDocument, from: number, to: number, name: strin
     }
     const open = i + 3;
     const close = document.match[open];
-    const args = splitArgs(document, open, close < 0 ? to : close);
-    const classArg = (k: number): string | undefined => {
-      const arg = args[k];
-      if (!arg) {
-        return undefined;
+    // Named arguments (`related: Post::class`) are taken positionally: Laravel's order.
+    const args = splitArgs(document, open, close < 0 ? to : close).map(([s, e]): [number, number] =>
+      t[s]?.type === 'ident' && document.isOp(s + 1, ':') && s + 2 <= e ? [s + 2, e] : [s, e],
+    );
+    /** The class an expression [s, e] names. */
+    const classRef = (s: number, e: number, depth = 0): Pick<RelationInfo, 'related' | 'relatedRef'> => {
+      const [a, c] = [t[s], t[s + 2]];
+      if (a?.type === 'ident' && document.isOp(s + 1, '::') && c?.value.toLowerCase() === 'class') {
+        return { related: document.resolveClass(a.value) };
       }
-      const [a, b, c] = [t[arg[0]], t[arg[0] + 1], t[arg[0] + 2]];
-      if (a?.type === 'ident' && b?.type === 'op' && b.value === '::' && c?.value.toLowerCase() === 'class') {
-        return document.resolveClass(a.value);
+      // static::$postModel, self::$postModel, $this->postModel
+      if (a?.type === 'ident' && /^(static|self)$/i.test(a.value) && document.isOp(s + 1, '::') && c?.type === 'var') {
+        return { relatedRef: { property: c.value, definedIn } };
       }
-      const literal = literalValue(a);
-      return literal ? literal.replace(/^\\/, '') : undefined;
+      if (a?.type === 'var' && a.value === '$this' && document.isOp(s + 1, '->') && c?.type === 'ident') {
+        return { relatedRef: { property: `$${c.value}`, definedIn } };
+      }
+      // model_class('Lists\Post'): a helper resolving a class path at runtime
+      const hint = literalValue(c);
+      if (a?.type === 'ident' && document.isOp(s + 1, '(') && hint && document.isOp(s + 3, ')') && s + 3 === e) {
+        return { relatedRef: { hint, definedIn } };
+      }
+      // `$postModel = model_class('Post'); return $this->hasMany($postModel)`: its last assignment
+      if (a?.type === 'var' && s === e && depth === 0) {
+        for (let p = i - 1; p >= from; p--) {
+          if (
+            t[p].type === 'var' &&
+            t[p].value === a.value &&
+            document.isOp(p + 1, '=') &&
+            !document.isOp(p - 1, '->')
+          ) {
+            let end = p + 2;
+            while (end < i && !document.isOp(end + 1, ';')) {
+              end++;
+            }
+            return classRef(p + 2, end, depth + 1);
+          }
+        }
+        return {};
+      }
+      const literal = s === e ? literalValue(a) : undefined;
+      return literal ? { related: literal.replace(/^\\/, '') } : {};
     };
+    const classArg = (k: number): Pick<RelationInfo, 'related' | 'relatedRef'> =>
+      args[k] ? classRef(args[k][0], args[k][1]) : {};
     const type = method.value.toLowerCase();
     const relation: RelationInfo = {
       name,
       type,
-      related: type === 'morphto' ? undefined : classArg(0),
+      ...(type === 'morphto' ? {} : classArg(0)),
       args: args.map((range) => (range[0] === range[1] ? literalValue(t[range[0]]) : undefined)),
     };
     if (type === 'hasonethrough' || type === 'hasmanythrough') {
-      relation.through = classArg(1);
+      relation.through = classArg(1).related;
     }
     if (type === 'belongstomany') {
       relation.pivotTable = relation.args[1];

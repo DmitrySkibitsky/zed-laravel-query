@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
-import { createHarness, type Harness, php } from './helpers.ts';
+import { createHarness, type Harness, LEGACY_FILES, php } from './helpers.ts';
 
 let h: Harness;
 before(async () => {
@@ -155,5 +155,50 @@ describe('code actions', () => {
     const { document, offset } = h.document(php(`DB::table('users')->where('em|ail', 1);`));
     const titles = h.service.codeActions(document, document.positionAt(offset), h.workspace, []).map((a) => a.title);
     assert.ok(titles.includes('Laravel Query: reset usage rank of users.email'));
+  });
+});
+
+describe('diagnostics in long-lived codebases', () => {
+  let legacy: Harness;
+  before(async () => {
+    legacy = await createHarness({}, LEGACY_FILES);
+  });
+  after(() => legacy.cleanup());
+
+  const messages = (source: string, file?: string) => {
+    const { document } = legacy.document(`${source}‸`, file);
+    return legacy.service.diagnostics(document, legacy.workspace).map((d) => d.message);
+  };
+
+  test("no parent's columns for an unresolvable relation, no tables in a collection's join()", () => {
+    assert.deepEqual(
+      messages(php(`/** @var \\App\\Models\\Legacy\\Account $account */\n$account->owner()->where('owner_only', 1);`)),
+      [],
+    );
+    assert.deepEqual(messages(php(`$user->posts()->pluck('title')->join(', ');`)), []);
+    assert.deepEqual(
+      messages(php(`User::where($table . '.nmae', 1)->orWhere('users.' . $column, 1);`)),
+      [],
+      'fragments',
+    );
+  });
+
+  test('migrations are history: not checked against the current schema', () => {
+    const migration = `<?php
+use Illuminate\\Database\\Migrations\\Migration;
+use Illuminate\\Database\\Schema\\Blueprint;
+use Illuminate\\Support\\Facades\\Schema;
+
+return new class extends Migration {
+    public function down(): void
+    {
+        Schema::table('users', function (Blueprint $table) {
+            $table->dropColumn('removed_long_ago');
+        });
+        DB::table('old_table')->where('gone', 1)->delete();
+    }
+};
+`;
+    assert.deepEqual(messages(migration, 'database/migrations/2020_01_01_000000_drop_things.php'), []);
   });
 });

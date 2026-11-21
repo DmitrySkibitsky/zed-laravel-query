@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import type { CompletionItem } from 'vscode-languageserver/node';
-import { createHarness, type Harness, php } from './helpers.ts';
+import { createHarness, type Harness, LEGACY_ACCOUNT, LEGACY_FILES, php } from './helpers.ts';
 
 let h: Harness;
 before(async () => {
@@ -455,5 +455,82 @@ class Post extends Model
     } finally {
       h.workspace.project.dropOverride(`${h.project.root}/app/Models/Post.php`);
     }
+  });
+});
+
+describe('long-lived codebases', () => {
+  let legacy: Harness;
+  before(async () => {
+    legacy = await createHarness({}, LEGACY_FILES);
+  });
+  after(() => legacy.cleanup());
+
+  const account = (body: string, type = 'Account') =>
+    legacy.labels(php(`/** @var \\App\\Models\\Legacy\\${type} $account */\n${body}`));
+
+  test('related class from a static property, late bound', async () => {
+    assert.ok((await account(`$account->posts()->where('‸');`)).includes('title'));
+    assert.ok((await account(`$account->posts()->where('‸');`, 'ArchivedAccount')).includes('content'));
+    assert.ok((await account(`$account->with('posts.‸');`)).includes('posts.comments'), 'relation paths too');
+  });
+
+  test('related class given to a helper by a relative path, named arguments', async () => {
+    assert.ok((await account(`$account->roles()->where('‸');`)).includes('slug'));
+    assert.ok((await account(`$account->profile()->where('‸');`)).includes('avatar'));
+  });
+
+  test('related class in a variable assigned in the relation method', async () => {
+    assert.ok((await account(`$account->latestComment()->where('‸');`)).includes('approved'));
+  });
+
+  test('local scopes bring the tables they join, through the scopes they call', async () => {
+    const result = await account(`$account->withPostComments()->where('‸');`);
+    assert.ok(result.includes('title') && result.includes('c.approved'), result.join(', '));
+  });
+
+  test("an unresolvable related class does not fall back to the parent's table", async () => {
+    assert.deepEqual(await account(`$account->owner()->where('‸');`), []);
+  });
+
+  test("an untyped local scope's parameter is the model's builder", async () => {
+    const source = LEGACY_ACCOUNT.replace("whereNotNull('email')", "whereNotNull('‸')");
+    assert.ok((await legacy.labels(source, 'app/Models/Legacy/Account.php')).includes('email'));
+    legacy.close('app/Models/Legacy/Account.php');
+  });
+
+  test('a project builder class is a query', async () => {
+    const result = await legacy.labels(
+      php(`$filter = function (\\App\\Query\\GridBuilder $q) { $q->where('posts.‸'); };`),
+    );
+    assert.ok(result.includes('posts.title'));
+  });
+
+  test("a project builder's tables come from the qualifiers it names", async () => {
+    const result = await legacy.labels(
+      php(
+        `$repository->query()->when($x, function (\\App\\Query\\GridBuilder $q) { $q->addSelect(['posts.title', '‸']); });`,
+      ),
+    );
+    assert.ok(result.includes('title'), result.join(', '));
+  });
+
+  test('a bare builder @var does not hide what the assignment resolves to', async () => {
+    const result = await legacy.labels(
+      php(
+        `/** @var \\App\\Query\\GridBuilder $q */\n$q = User::query()->join('posts', 'posts.user_id', '=', 'users.id');\n$q->where('‸');`,
+      ),
+    );
+    assert.ok(result.includes('name') && result.includes('title'), result.join(', '));
+  });
+
+  test('a join closure knows the joined table when the outer query does not', async () => {
+    const result = await legacy.labels(
+      php(`$repository->query()->leftJoin('posts', function ($join) { $join->on('‸'); });`),
+    );
+    assert.ok(result.some((l) => l === 'title' || l === 'posts.title'));
+  });
+
+  test("a collection's join() is not a table", async () => {
+    assert.deepEqual(await legacy.labels(php(`$user->posts->pluck('title')->join('‸');`)), []);
   });
 });
