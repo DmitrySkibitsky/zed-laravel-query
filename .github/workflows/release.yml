@@ -1,0 +1,80 @@
+name: Release
+
+# A `v<version>` tag on a commit of `main` releases that version:
+# 1. checks it (same as CI) and that every version file matches the tag,
+# 2. creates the GitHub release with the language server bundle — the Zed extension downloads
+#    `laravel-query-server.cjs` from the release of its own version,
+# 3. opens the pull request that updates the extension in the Zed registry
+#    (zed-industries/extensions), once the first version is published there.
+on:
+  push:
+    tags: ["v*"]
+
+# A release is never cancelled half-way.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The registry builds the extension from this commit and requires it to be on a branch.
+      - name: The tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Every version file matches the tag
+        run: nix develop --command node scripts/version.mjs check "$GITHUB_REF_NAME"
+      - name: Install toolchains and dependencies
+        run: nix develop --command make setup
+      - name: make check
+        run: nix develop --command make check
+      - name: Build the server bundle and the extension
+        run: nix develop --command make build
+      - name: Create the release with the server bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          (cd server/dist && sha256sum laravel-query-server.cjs > laravel-query-server.cjs.sha256)
+          gh release create "$TAG" \
+            server/dist/laravel-query-server.cjs \
+            server/dist/laravel-query-server.cjs.sha256 \
+            --verify-tag --title "$TAG" --generate-notes
+
+  # Updates after the first publication. Needs the repository variable ZED_REGISTRY_PUBLISHED=true
+  # (set once the first registry pull request is merged), a fork of zed-industries/extensions in
+  # the owner's account, and the COMMITTER_TOKEN secret (classic PAT, scopes: repo, workflow).
+  registry:
+    name: Zed registry pull request
+    needs: release
+    if: vars.ZED_REGISTRY_PUBLISHED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: huacnlee/zed-extension-action@8cd592a0d24e1e41157740f1a529aeabddc88a1b # v2.0.0
+        with:
+          extension-name: laravel-query
+          push-to: ${{ github.repository_owner }}/extensions
+        env:
+          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}

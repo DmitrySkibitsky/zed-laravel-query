@@ -1,0 +1,13 @@
+# Rust / Zed build output
+/target/
+*.wasm
+/grammars/
+
+# Language server (the bundle is a release asset, built by CI)
+node_modules/
+/server/dist/
+
+# Nix
+result
+result-*
+.direnv/

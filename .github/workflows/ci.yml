@@ -1,0 +1,129 @@
+name: CI
+
+# Changes are made on branches and merged through pull requests; `main` is checked again after the
+# merge. The branch ruleset requires the single "CI result" check. Documentation-only changes skip
+# the heavy jobs inside the workflow rather than skipping the workflow: a workflow that never runs
+# leaves a required check pending forever, a skipped job counts as passed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to a pull request cancels the older run. Every commit on `main` gets its own run:
+# a shared group would cancel or skip a pending one, leaving that commit unchecked.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# No job writes to the repository, and checkouts do not keep the token: npm install scripts and
+# cargo build scripts run in the workspace.
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        name: Anything besides docs/, Markdown and LICENSE?
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            # New branch or an unknown base: check everything.
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # --no-renames: a rename lists its old path too, so moving code under docs/ is a code change.
+          git diff --name-only --no-renames "$BASE" "$GITHUB_SHA"
+          code=$(git diff --name-only --no-renames "$BASE" "$GITHUB_SHA" | grep -v -E '^docs/|\.md$|^LICENSE$' | head -1)
+          echo "code=$([ -n "$code" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  check:
+    name: Lint, tests, bundle and extension build
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # The databases the drivers are tested against (`make test-db`), same images as `make db-up`.
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports: ["53306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: root
+        ports: ["53307:3306"]
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The same tools and versions as locally: flake.lock (node, Biome, nixfmt, rustup),
+      # rust-toolchain.toml (Rust + wasm32-wasip2), package-lock.json (server dependencies).
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Install toolchains and dependencies
+        run: nix develop --command make setup
+      # Formatting (rustfmt, Biome, nixfmt), clippy, Biome lint, tsc, version files in sync, Rust
+      # and server tests (unit + end-to-end on the bundle with SQLite).
+      - name: make check
+        run: nix develop --command make check
+      # Introspection of MySQL, MariaDB and PostgreSQL (the service containers above).
+      - name: make test-db
+        run: nix develop --command make test-db
+      # The release asset (server bundle) and what Zed does on install (cargo build of the wasm).
+      - name: Build the server bundle and the extension
+        run: nix develop --command make build
+
+  # The one check the branch ruleset requires: jobs skipped for a documentation-only change still
+  # let it pass, while a required job that never ran would block the pull request.
+  result:
+    name: CI result
+    if: always()
+    needs: [changes, check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed, or was skipped for a documentation-only change
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *) exit 1 ;;
+            esac
+          done

@@ -1,0 +1,6 @@
+# Zed compiles extensions to WebAssembly Component Model modules (wasm32-wasip2).
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-wasip2"]

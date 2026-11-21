@@ -1,0 +1,18 @@
+id = "laravel-query"
+name = "Laravel Query"
+version = "0.1.0"
+schema_version = 1
+authors = ["Dmitry Skibitsky"]
+description = "Database-aware completion, hover, navigation and checks for the Laravel query builder, Eloquent, the schema builder and migrations (MySQL, MariaDB, PostgreSQL, SQLite)."
+repository = "https://github.com/DmitrySkibitsky/zed-laravel-query"
+
+# Runs next to the PHP language servers (intelephense, phpactor, laravel…): Zed merges their
+# completions, hovers and definitions. The server answers only inside query builder strings.
+# It is downloaded from this repository's GitHub release of the same version.
+[language_servers.laravel-query]
+name = "Laravel Query"
+languages = ["PHP", "Blade"]
+
+[language_servers.laravel-query.language_ids]
+PHP = "php"
+Blade = "blade"

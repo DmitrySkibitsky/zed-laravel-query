@@ -1,0 +1,44 @@
+// Zed settings for working on this repository: format on save with the project's tools
+// (Biome for TypeScript/JavaScript/JSON, rustfmt via rust-analyzer), clippy diagnostics.
+{
+  "languages": {
+    "TypeScript": {
+      "format_on_save": "on",
+      "formatter": { "language_server": { "name": "biome" } },
+      "code_actions_on_format": {
+        "source.organizeImports.biome": true,
+        "source.fixAll.biome": true
+      }
+    },
+    "JavaScript": {
+      "format_on_save": "on",
+      "formatter": { "language_server": { "name": "biome" } },
+      "code_actions_on_format": {
+        "source.organizeImports.biome": true,
+        "source.fixAll.biome": true
+      }
+    },
+    "JSON": {
+      "format_on_save": "on",
+      "formatter": { "language_server": { "name": "biome" } }
+    },
+    "Rust": {
+      "format_on_save": "on"
+    },
+    "Nix": {
+      "format_on_save": "on",
+      "formatter": { "external": { "command": "nixfmt" } }
+    }
+  },
+  "lsp": {
+    // Use the project's biome.json only (no implicit defaults in other folders)
+    "biome": {
+      "settings": { "require_config_file": true }
+    },
+    "rust-analyzer": {
+      "initialization_options": {
+        "check": { "command": "clippy" }
+      }
+    }
+  }
+}
