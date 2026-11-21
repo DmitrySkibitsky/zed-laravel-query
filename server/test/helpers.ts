@@ -202,6 +202,8 @@ use Illuminate\\Database\\Eloquent\\Relations\\BelongsToMany;
 
 class Account extends Model
 {
+    use \\App\\Query\\UsesAccountBuilder;
+
     protected $table = 'users';
 
     protected static $postModel = 'App\\Models\\Post';
@@ -405,6 +407,67 @@ namespace PHPSTORM_META {
         'users' => \\App\\Repositories\\UserRepository::class,
         'roles' => '\\App\\Repositories\\RoleRepository',
     ]));
+}
+`,
+  'app/Query/UsesAccountBuilder.php': `<?php
+namespace App\\Query;
+
+trait UsesAccountBuilder
+{
+    public function newEloquentBuilder($query)
+    {
+        return new AccountBuilder($query);
+    }
+}
+`,
+  'app/Query/AccountBuilder.php': `<?php
+namespace App\\Query;
+
+use Illuminate\\Database\\Eloquent\\Builder;
+
+class AccountBuilder extends Builder
+{
+    public function withProfileRow()
+    {
+        return $this->leftJoin('profiles', 'profiles.user_id', '=', 'users.id');
+    }
+
+    public function addSelectDistance($lat, $lng, $as = 'distance')
+    {
+        return $this->selectRaw(distance_sql($lat, $lng) . ' as ' . $as);
+    }
+}
+`,
+  'app/Providers/QueryMacroServiceProvider.php': `<?php
+namespace App\\Providers;
+
+use Illuminate\\Database\\Eloquent\\Builder;
+use Illuminate\\Database\\Query\\Builder as QueryBuilder;
+use Illuminate\\Support\\Facades\\DB;
+use Illuminate\\Support\\ServiceProvider;
+
+class QueryMacroServiceProvider extends ServiceProvider
+{
+    public function boot(): void
+    {
+        $macro = function ($alias = 'full_name', string $table = 'users') {
+            return $this->addSelect([DB::raw(full_name_sql(alias: $alias, table: $table))]);
+        };
+        QueryBuilder::macro('selectFullName', $macro);
+        Builder::macro('selectFullName', $macro);
+
+        Builder::macro('wherePrefix', function (string $column, string $prefix) {
+            return $this->where($column, 'like', $prefix . '%');
+        });
+
+        Builder::macro('withAuthorRow', function () {
+            return $this->leftJoin('users as author', 'author.id', '=', 'posts.user_id')->addSelect('author.name as author_name');
+        });
+
+        Builder::macro('selectRandomSql', function () {
+            return $this->selectRaw(random_sql());
+        });
+    }
 }
 `,
   'app/Query/GridBuilder.php': `<?php

@@ -214,6 +214,42 @@ describe('diagnostics in long-lived codebases', () => {
     );
   });
 
+  test('names builder macros and methods select are valid later, and bare names stay checked', () => {
+    assert.deepEqual(
+      messages(php(`User::selectFullName('author')->orderBy('author')->orderBy('full_nme');`)),
+      ["Unknown column 'full_nme' in users"],
+      'the alias argument',
+    );
+    assert.deepEqual(messages(php(`User::selectFullName()->orderBy('full_name');`)), [], 'its default');
+    assert.deepEqual(
+      messages(php(`User::selectFullName(table: 'users', alias: 'author')->orderBy('author');`)),
+      [],
+      'a named argument',
+    );
+    assert.deepEqual(
+      messages(
+        php(`\\App\\Models\\Legacy\\Account::addSelectDistance(1, 2)->having('distance', '<', 1)->where('nmae', 1);`),
+      ),
+      ["Unknown column 'nmae' in users"],
+      "the model builder's method",
+    );
+    assert.deepEqual(messages(php(`User::selectRandomSql()->orderBy('nmae');`)), [], 'SQL built at runtime, no alias');
+    assert.deepEqual(
+      messages(
+        php(
+          `$q = User::query();\n$q->groupBy('kind')->orderBy('nmae');\n$a = (clone $q)->addSelect(DB::raw("'" . $x . "' as kind"));`,
+        ),
+      ),
+      ["Unknown column 'nmae' in users"],
+      'an alias its clones select, raw SQL naming its alias',
+    );
+    assert.deepEqual(
+      messages(php(`User::selectFullName('a', 'author_alias');`)),
+      [],
+      'table parameters are not checked',
+    );
+  });
+
   test('names a local scope selects are valid later', () => {
     assert.deepEqual(
       messages(

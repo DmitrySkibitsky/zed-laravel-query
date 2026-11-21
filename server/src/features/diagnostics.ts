@@ -46,7 +46,7 @@ export function diagnose(
       continue;
     }
     const context = contextAt(analyzer, i) ?? scalarPropertyContext(analyzer, i);
-    if (!context || context.newColumn) {
+    if (!context || context.newColumn || context.unchecked) {
       continue;
     }
     // `$user->setAttribute('full_name', ...)`: attributes include accessors and appended ones.

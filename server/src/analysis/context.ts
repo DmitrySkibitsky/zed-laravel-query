@@ -57,6 +57,8 @@ export interface QueryContext {
   newColumn?: boolean;
   /** Inside a validation rule string (`exists:table,column`). */
   rule?: boolean;
+  /** Completed but not checked against the schema (it may name an alias). */
+  unchecked?: boolean;
 }
 
 const OPERATOR_FIRST = new Set(['where', 'orwhere', 'wherenot', 'orwherenot', 'having', 'orhaving', 'firstwhere']);
@@ -255,6 +257,20 @@ function callContext(analyzer: Analyzer, site: CallSite, base: Base): QueryConte
   if (!rules && scope.kind === 'blueprint' && BLUEPRINT_COLUMN_TYPES.has(method)) {
     rules = [{ kind: 'column', index: 0, variadic: false }];
   }
+  // A local scope, a method of the project's builder or a macro: its parameter names tell.
+  let unchecked = false;
+  if (!rules && (scope.kind === 'query' || scope.kind === 'model') && site.arrays.length <= 1) {
+    const body =
+      scope.model?.scopes.get(method) ?? analyzer.project?.customMethod(scope.builder ?? scope.model?.builder, method);
+    const param = site.argName ?? body?.params[site.argIndex + body.argOffset];
+    if (param && /^(columns?|attributes?|fields?)$|column_?name$/i.test(param)) {
+      rules = [{ kind: 'column', index: site.argIndex, variadic: false }];
+    } else if (param && /^tables?$/i.test(param)) {
+      // Often an alias of a joined table: completed, not checked.
+      rules = [{ kind: 'table', index: site.argIndex, variadic: false }];
+      unchecked = true;
+    }
+  }
   if (!rules) {
     return undefined;
   }
@@ -334,7 +350,7 @@ function callContext(analyzer: Analyzer, site: CallSite, base: Base): QueryConte
   if (result.inferred && site.close > 0) {
     analyzer.collectMentioned(site.open, site.close, result);
   }
-  const context: QueryContext = { ...base, kinds: [], scope: result };
+  const context: QueryContext = { ...base, kinds: [], scope: result, unchecked };
 
   // whereRelation('posts', 'title'), withSum('orders', 'total'): columns of the related model.
   if (RELATED_COLUMN_METHODS.has(method) && site.argIndex === 1 && result.model && analyzer.project) {

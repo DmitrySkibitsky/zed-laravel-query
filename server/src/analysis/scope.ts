@@ -71,6 +71,8 @@ export interface Scope {
   repository?: string;
   /** A method we do not know ran on the query (a macro, a scope we cannot see): it may have selected more. */
   partial?: boolean;
+  /** The project's builder class of a query typed by it (`function (GridBuilder $q)`). */
+  builder?: string;
 }
 
 export function emptyScope(kind: ScopeKind = 'unknown'): Scope {
@@ -844,27 +846,60 @@ export class Analyzer {
     }
     // A local scope: `->withAuthors()` brings the tables its body joins and the names it selects.
     if (scope.model?.scopes.has(name)) {
-      const next = cloneScope(scope);
-      for (const local of this.localScopes(scope.model, name, new Set())) {
-        next.partial ||= local.computedSelect;
-        for (const join of local.joins) {
-          const parsed = parseTableExpression(join);
-          if (!next.tables.some((t) => t.name === parsed.name && t.alias === parsed.alias)) {
-            next.tables.push({ name: parsed.name, alias: parsed.alias, origin: 'join' });
-          }
-        }
-        for (const alias of local.aliases) {
-          next.aliases.add(alias);
-        }
-      }
-      return next;
+      return this.applyBodies(scope, this.localScopes(scope.model, name, new Set()), args);
     }
     if (segment.open !== undefined && !isLaravelQueryMethod(name)) {
+      // A method of the project's builder or a macro: what its body does; anything else may
+      // have selected more than we can tell.
+      const custom = this.project?.customMethod(scope.builder ?? scope.model?.builder, name);
+      if (custom) {
+        return this.applyBodies(scope, [custom], args);
+      }
       const next = cloneScope(scope);
       next.partial = true;
       return next;
     }
     return scope;
+  }
+
+  /** The literal passed for a parameter: by name (`alias: 'x'`), else at its position. */
+  private argumentFor(args: Array<[number, number]>, param: string, position: number): string | undefined {
+    const doc = this.doc;
+    const isNamed = (range: [number, number]) => doc.tok(range[0])?.type === 'ident' && doc.isOp(range[0] + 1, ':');
+    const named = args.find((range) => isNamed(range) && doc.tok(range[0])?.value === param);
+    if (named) {
+      return this.literalArg([named[0] + 2, named[1]]);
+    }
+    const positional = args[position];
+    return positional && !isNamed(positional) ? this.literalArg(positional) : undefined;
+  }
+
+  /** The body of a scope, builder method or macro (and the scopes it calls) applied to a query. */
+  private applyBodies(scope: Scope, bodies: LocalScope[], args: Array<[number, number]>): Scope {
+    const next = cloneScope(scope);
+    bodies.forEach((body, i) => {
+      for (const join of body.joins) {
+        const parsed = parseTableExpression(join);
+        if (!next.tables.some((t) => t.name === parsed.name && t.alias === parsed.alias)) {
+          next.tables.push({ name: parsed.name, alias: parsed.alias, origin: 'join' });
+        }
+      }
+      for (const alias of body.aliases) {
+        next.aliases.add(alias);
+      }
+      // `selectFullName('author')`: the argument (or its default) is what the body selects as.
+      const index = body.aliasParam;
+      const alias =
+        index === undefined
+          ? undefined
+          : ((i === 0 ? this.argumentFor(args, body.params[index], index - body.argOffset) : undefined) ??
+            body.defaults[index]);
+      if (alias) {
+        next.aliases.add(alias.toLowerCase());
+      }
+      next.partial ||= body.computedSelect && index === undefined;
+    });
+    return next;
   }
 
   /** Tables the closures passed in (open, close) join on their first parameter. */
@@ -1135,6 +1170,32 @@ export class Analyzer {
     const t = doc.tokens;
     let result = scope;
     for (let i = fn.bodyStart; i <= fn.bodyEnd && i < t.length; i++) {
+      // `(clone $query)->addSelect('... as kind')->union(...)`: names its copies select count too
+      // (`$query->groupBy('kind')` ends up in their SQL), not what they join.
+      if (
+        t[i].type === 'var' &&
+        t[i].value === name &&
+        doc.isIdent(i - 1, 'clone') &&
+        doc.isOp(i - 2, '(') &&
+        doc.isOp(i + 1, ')') &&
+        doc.isOp(i + 2, '->')
+      ) {
+        for (const segment of segmentsAfter(doc, i + 1)) {
+          if (
+            SELECT_METHODS.has(segment.name.toLowerCase()) &&
+            segment.open !== undefined &&
+            segment.close !== undefined
+          ) {
+            if (result === scope) {
+              result = cloneScope(scope);
+            }
+            for (const range of callArgs(doc, segment.open, segment.close)) {
+              this.collectAliases(range, result.aliases);
+            }
+          }
+        }
+        continue;
+      }
       if (t[i].type !== 'var' || t[i].value !== name || !doc.isOp(i + 1, '->', '?->')) {
         continue;
       }
@@ -1190,6 +1251,7 @@ export class Analyzer {
       }
     }
     let builder = BUILDER_TYPES.test(cleaned);
+    let builderClass: string | undefined;
     let other: string | undefined;
     for (const part of cleaned.split('|')) {
       const name = part.replace(/<.*$/, '').replace(/\[\]$/, '').trim();
@@ -1211,6 +1273,9 @@ export class Analyzer {
       }
       const isBuilder = this.project?.extendsAny(fqn, BUILDER_BASES) ?? false;
       builder ||= isBuilder;
+      if (isBuilder && !BUILDER_BASES.has(fqn.toLowerCase())) {
+        builderClass ??= fqn;
+      }
       if (!isBuilder && !part.endsWith('[]')) {
         other ??= fqn;
       }
@@ -1223,7 +1288,7 @@ export class Analyzer {
         return this.modelScope(model);
       }
       // Its tables come from its joins and the qualifiers its strings name.
-      return { ...emptyScope('query'), inferred: true };
+      return { ...emptyScope('query'), inferred: true, builder: builderClass };
     }
     // A repository or another class whose members' types lead on.
     return other ? this.classScope(other) : undefined;
