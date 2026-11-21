@@ -1,6 +1,7 @@
 /**
  * Go to definition: a table string opens its models and the migrations that create/alter it, a
- * column string the migration lines that define it.
+ * column string the migration lines that define it, a class-name string
+ * (`'App\Models\User'`) the class declaration.
  */
 import * as fs from 'node:fs';
 import type { Location } from 'vscode-languageserver/node';
@@ -49,6 +50,18 @@ function positionIn(file: string, offset: number): { line: number; character: nu
 function location(file: string, offset: number): Location {
   const position = positionIn(file, offset);
   return { uri: URI.file(file).toString(), range: { start: position, end: position } };
+}
+
+/** A namespaced class name: `App\Models\User`, `\App\Models\User`. */
+const CLASS_NAME = /^\\?[A-Za-z_\x80-\uffff][\w\x80-\uffff]*(?:\\[A-Za-z_\x80-\uffff][\w\x80-\uffff]*)+$/;
+
+/** A string holding a namespaced class name (`protected static $model = 'App\Models\User'`). */
+export function classDefinition(value: string, project: LaravelProject | undefined): Location[] | null {
+  if (!project || !CLASS_NAME.test(value)) {
+    return null;
+  }
+  const declared = project.classLocation(value);
+  return declared ? [location(declared.file, declared.offset)] : null;
 }
 
 export function definition(
