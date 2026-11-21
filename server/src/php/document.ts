@@ -618,7 +618,10 @@ export function literalValue(token: Token | undefined): string | undefined {
   return token.value;
 }
 
-/** `DB::raw(...)` / `->raw(...)` in (open, close) whose SQL is not a plain string. */
+/**
+ * `DB::raw(...)` / `->raw(...)` in (open, close) whose SQL is not a plain string, unless its
+ * string parts still name the alias (`DB::raw("'" . $kind . "' as kind")`).
+ */
 export function hasComputedRaw(doc: PhpDocument, open: number, close: number): boolean {
   for (let i = open + 1; i < close; i++) {
     const token = doc.tok(i);
@@ -629,7 +632,14 @@ export function hasComputedRaw(doc: PhpDocument, open: number, close: number): b
       doc.isOp(i + 1, '(')
     ) {
       const end = doc.match[i + 1];
-      if (end !== i + 3 || literalValue(doc.tok(i + 2)) === undefined) {
+      if (end === i + 3 && literalValue(doc.tok(i + 2)) !== undefined) {
+        continue;
+      }
+      let named = false;
+      for (let j = i + 2; j < end; j++) {
+        named ||= /\bas\s+[`"']?\w+[`"']?\s*$/i.test(literalValue(doc.tok(j)) ?? '');
+      }
+      if (!named) {
         return true;
       }
     }

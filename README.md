@@ -40,6 +40,13 @@ User::query()
     stays unknown (`morphTo`) gives no columns rather than the parent's;
   - the tables local scopes join and the names they select `as`: `->withAuthor()` adds what
     `scopeWithAuthor()` joins, and what the scopes it calls join;
+  - **builder macros and project builders**: `Builder::macro('name', fn)` in the service
+    providers (`Providers/` of the project and its packages; a closure or a variable holding one)
+    and the methods of a model's own builder (`newEloquentBuilder()` returning `new GridBuilder`,
+    also from a trait; `protected static string $builder`) are read like local scopes — the tables
+    they join, the names they select, and an alias parameter (`selectFullName(alias: 'author')`
+    selects `author`). Their `$column` / `$attributes` / `…ColumnName` parameters complete
+    columns, `$table` parameters tables (completed, not checked: often an alias);
   - **repositories**: a class naming its model (`model()` returning `Post::class`, a class string
     or a helper's class path; `$this->setModel(...)` in the constructor; `$model = Post::class`) is
     its model's query — `app(PostRepository::class)->query()`, `->find()`, `->with()` …; its own
@@ -82,9 +89,9 @@ User::query()
   known; subquery aliases, `select … as` aliases, `withCount` columns and raw SQL are respected).
   Migrations are not checked (they name columns that were dropped or renamed since), nor are
   fragments of concatenations (`$table . '.status'`), a collection's `join(', ')`, or attribute
-  names (`setAttribute()`, `isDirty()` … take accessors too). After a method the server does not
-  know (a macro, a builder method of the project), only `table.column` is checked: the method may
-  have selected more.
+  names (`setAttribute()`, `isDirty()` … take accessors too). After a method the server cannot read
+  (a mixin, a macro outside the service providers) or SQL built at runtime without a literal
+  alias, only `table.column` is checked: it may have selected more.
 - **Fast and cached:** schemas are read with a few `information_schema` / `pg_catalog` queries,
   kept in memory with lookup indexes and cached on disk; a new session answers from the cache
   immediately and refreshes in the background. A change of the migrations table (`php artisan

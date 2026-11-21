@@ -606,6 +606,20 @@ describe('long-lived codebases', () => {
     legacy.close(file);
   });
 
+  test('builder macros and methods of the model builder: joins, argument kinds', async () => {
+    assert.ok((await legacy.labels(php(`User::wherePrefix('‸', 'a');`))).includes('email'), 'a macro column parameter');
+    assert.ok(
+      (await legacy.labels(php(`User::selectFullName('a', '‸');`))).includes('users'),
+      'a macro table parameter',
+    );
+    assert.ok(
+      (await legacy.labels(php(`Post::withAuthorRow()->where('author.‸');`))).includes('author.name'),
+      'a macro join',
+    );
+    const account = await legacy.labels(php(`\\App\\Models\\Legacy\\Account::withProfileRow()->where('‸');`));
+    assert.ok(account.includes('avatar'), "the model builder's method (newEloquentBuilder in a trait)");
+  });
+
   test('eloquent-power-joins: relation names, the tables along the path, the join closure', async () => {
     assert.ok((await legacy.labels(php(`User::joinRelationship('‸');`))).includes('posts'));
     const joined = await legacy.labels(php(`User::joinRelationship('posts.comments')->where('‸');`));

@@ -41,6 +41,13 @@ export interface LocalScope {
   aliases: string[];
   /** It selects SQL built at runtime (`DB::raw(full_name_sql('author'))`): any name may follow. */
   computedSelect: boolean;
+  /** Parameter names without `$`, and their literal defaults. */
+  params: string[];
+  defaults: Array<string | undefined>;
+  /** Parameters the caller does not pass: 1 for a local scope's `$query`. */
+  argOffset: number;
+  /** The parameter naming what it selects (`selectFullName($alias = 'name')`). */
+  aliasParam?: number;
 }
 
 export interface ModelInfo {
@@ -56,6 +63,8 @@ export interface ModelInfo {
   relations: Map<string, RelationInfo>;
   /** Local scopes by lower-cased name without the prefix (`scopePublished` → `published`). */
   scopes: Map<string, LocalScope>;
+  /** Its own Eloquent builder class (`newEloquentBuilder()`, `$builder`), if any. */
+  builder?: string;
 }
 
 /** A class named in code: resolved, or a reference resolved per model / repository. */
@@ -70,6 +79,8 @@ export interface MethodInfo {
   modelRef?: ClassRef;
   /** Parameter names without `$`, in order. */
   params: string[];
+  /** What its body does to `$this` as a query (for builder classes). */
+  body: LocalScope;
 }
 
 interface ClassInfo {
@@ -92,6 +103,8 @@ interface ClassInfo {
   methods: Map<string, MethodInfo>;
   /** A repository's model: `model()` returning a class, `$this->setModel(...)`, `$model = X::class`. */
   modelRef?: ClassRef;
+  /** `newEloquentBuilder()` returning `new GridBuilder($query)`. */
+  builderClass?: string;
 }
 
 const MODEL_BASES = new Set(
@@ -146,6 +159,7 @@ export class LaravelProject {
   private migrationsScannedAt = 0;
   private modelIndex: { at: number; byTable: Map<string, string[]> } | undefined;
   private metaPaths: string[];
+  private macroIndex: { at: number; byName: Map<string, LocalScope> } | undefined;
   private metaCache: { checked: number; stamp: string; maps: MetaMaps } | undefined;
 
   constructor(
@@ -441,6 +455,7 @@ export class LaravelProject {
     let primaryKey: string | undefined;
     const relations = new Map<string, RelationInfo>();
     const scopes = new Map<string, LocalScope>();
+    let builder: string | undefined;
     const own = this.classInfo(fqn);
     /** The class and its ancestors and traits, nearest first: where properties are looked up. */
     const lineage: ClassInfo[] = [];
@@ -457,6 +472,7 @@ export class LaravelProject {
       const traits = info.traits.map((trait) => this.classInfo(trait)).filter((c): c is ClassInfo => !!c);
       lineage.push(...traits);
       for (const source of [info, ...traits]) {
+        builder ??= source.builderClass ?? source.classProperties.get('$builder');
         for (const [name, relation] of source.relations) {
           if (!relations.has(name)) {
             relations.set(name, relation);
@@ -502,6 +518,7 @@ export class LaravelProject {
       primaryKey: primaryKey ?? 'id',
       relations,
       scopes,
+      builder,
     };
   }
 
@@ -531,6 +548,42 @@ export class LaravelProject {
   extendsAny(fqn: string, bases: Set<string>): boolean {
     const key = fqn.replace(/^\\/, '').toLowerCase();
     return bases.has(key) || this.ancestors(fqn).some((c) => bases.has(c.replace(/^\\/, '')));
+  }
+
+  /**
+   * What a builder method we cannot find in Laravel does: a method of the project's builder class
+   * `builder`, or a macro (`Builder::macro('name', fn)`) registered in a service provider.
+   */
+  customMethod(builder: string | undefined, name: string): LocalScope | undefined {
+    if (builder) {
+      const method = this.methodInfo(builder, name);
+      if (method) {
+        return method.body;
+      }
+    }
+    return this.macros().get(name.toLowerCase());
+  }
+
+  /** Builder macros of the project's (and its packages') service providers. */
+  private macros(): Map<string, LocalScope> {
+    const now = Date.now();
+    if (this.macroIndex && now - this.macroIndex.at < 60_000) {
+      return this.macroIndex.byName;
+    }
+    const byName = new Map<string, LocalScope>();
+    for (const [, dirs] of this.psr4) {
+      for (const dir of dirs) {
+        for (const file of providerFiles(path.join(dir, 'Providers'))) {
+          try {
+            collectMacros(new PhpDocument(fs.readFileSync(file, 'utf8')), byName);
+          } catch {
+            // An unreadable provider: the others still count.
+          }
+        }
+      }
+    }
+    this.macroIndex = { at: now, byName };
+    return byName;
   }
 
   /** Whether a file declares `fqn` (project or vendor). */
@@ -965,6 +1018,14 @@ function classInfoOf(file: string, document: PhpDocument, decl: ClassDecl, fqn: 
       info.scopes.set(scopeName.toLowerCase(), localScopeOf(document, fn));
     }
     info.methods.set(fn.name.toLowerCase(), methodInfoOf(document, fn, decl));
+    if (fn.name.toLowerCase() === 'neweloquentbuilder') {
+      for (let j = fn.bodyStart; j > 0 && j < fn.bodyEnd; j++) {
+        if (document.isIdent(j, 'new') && t[j + 1]?.type === 'ident') {
+          info.builderClass = document.resolveClass(t[j + 1].value);
+          break;
+        }
+      }
+    }
     collectMembers(document, fn, info, decl);
   }
   // A repository that only sets its model in methods (`grid()`): the first one.
@@ -1045,7 +1106,7 @@ function docVarType(doc: string, name: string): string | undefined {
 
 function methodInfoOf(document: PhpDocument, fn: FunctionDecl, decl: ClassDecl): MethodInfo {
   const t = document.tokens;
-  const info: MethodInfo = { params: fn.params.map((p) => p.name.slice(1)) };
+  const info: MethodInfo = { params: fn.params.map((p) => p.name.slice(1)), body: localScopeOf(document, fn, 0) };
   let native = '';
   if (document.isOp(fn.paramsClose + 1, ':')) {
     for (let j = fn.paramsClose + 2; j < t.length && !document.isOp(j, '{', ';'); j++) {
@@ -1155,12 +1216,89 @@ function assignedType(
   return undefined;
 }
 
+/** PHP files of a `Providers` directory and its subdirectories (one level). */
+function providerFiles(dir: string): string[] {
+  const files: string[] = [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return files;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isFile() && entry.name.endsWith('.php')) {
+      files.push(full);
+    } else if (entry.isDirectory()) {
+      for (const sub of fs.readdirSync(full)) {
+        if (sub.endsWith('.php')) {
+          files.push(path.join(full, sub));
+        }
+      }
+    }
+  }
+  return files;
+}
+
+/** `Builder::macro('name', function (...) {...})`, or a closure in a variable assigned before. */
+function collectMacros(document: PhpDocument, into: Map<string, LocalScope>): void {
+  const t = document.tokens;
+  for (let i = 0; i + 3 < t.length; i++) {
+    if (
+      t[i].type !== 'ident' ||
+      !/Builder$/i.test(t[i].value) ||
+      !document.isOp(i + 1, '::') ||
+      !document.isIdent(i + 2, 'macro') ||
+      !document.isOp(i + 3, '(')
+    ) {
+      continue;
+    }
+    const close = document.match[i + 3];
+    const args = close > 0 ? splitArgs(document, i + 3, close) : [];
+    const name = literalValue(t[args[0]?.[0] ?? -1]);
+    if (!name || !args[1] || into.has(name.toLowerCase())) {
+      continue;
+    }
+    let start = args[1][0];
+    if (t[start]?.type === 'var' && args[1][0] === args[1][1]) {
+      // `$macro = function (...) {...}; Builder::macro('name', $macro);`
+      const variable = t[start].value;
+      for (let p = i - 1; p >= 0; p--) {
+        if (t[p].type === 'var' && t[p].value === variable && document.isOp(p + 1, '=')) {
+          start = p + 2;
+          break;
+        }
+      }
+    }
+    const fn = document.functions.find((f) => f.start === start || f.keyword === start);
+    if (fn) {
+      into.set(name.toLowerCase(), localScopeOf(document, fn, 0));
+    }
+  }
+}
+
 const JOINS = new Set(['join', 'leftjoin', 'rightjoin', 'crossjoin', 'joinwhere', 'leftjoinwhere', 'rightjoinwhere']);
 
 /** Joins and method calls in a local scope's own body (not in closures it passes on). */
-function localScopeOf(document: PhpDocument, fn: FunctionDecl): LocalScope {
+function localScopeOf(document: PhpDocument, fn: FunctionDecl, argOffset = 1): LocalScope {
   const t = document.tokens;
-  const scope: LocalScope = { joins: [], calls: [], aliases: [], computedSelect: false };
+  const params = fn.params.map((p) => p.name.slice(1));
+  const scope: LocalScope = {
+    joins: [],
+    calls: [],
+    aliases: [],
+    computedSelect: false,
+    params,
+    defaults: fn.params.map((p) => (document.isOp(p.tok + 1, '=') ? literalValue(t[p.tok + 2]) : undefined)),
+    argOffset,
+  };
+  const alias = params.findIndex((name, i) => i >= argOffset && /^(alias|as)$|_alias$|[a-z]Alias$/.test(name));
+  if (alias >= 0) {
+    scope.aliasParam = alias;
+  }
+  if (fn.bodyStart < 0) {
+    return scope;
+  }
   for (let j = fn.bodyStart; j < fn.bodyEnd; j++) {
     const text = literalValue(t[j]);
     if (text) {
