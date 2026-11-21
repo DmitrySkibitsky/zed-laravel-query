@@ -591,6 +591,12 @@ export class LaravelProject {
     return this.classInfo(fqn) !== undefined;
   }
 
+  /** The file and offset of the declaration of `fqn` (project or vendor). */
+  classLocation(fqn: string): { file: string; offset: number } | undefined {
+    const info = this.classInfo(fqn);
+    return info ? { file: info.file, offset: info.offset } : undefined;
+  }
+
   /** The class, its traits, its parents and their traits, nearest first. */
   private lineage(fqn: string): ClassInfo[] {
     const out: ClassInfo[] = [];

@@ -135,6 +135,22 @@ describe('definition', () => {
     assert.ok(line.uri.endsWith('create_users_table.php'));
     assert.equal(line.range.start.line, 11);
   });
+
+  test('class-name string → class declaration', () => {
+    for (const body of [
+      `class Post { protected static $userModel = 'App\\Models\\Us|er'; }`,
+      `$model = "\\\\App\\\\Models\\\\Us|er";`,
+    ]) {
+      const { document, offset } = h.document(php(body));
+      const [declared] = h.service.definition(document, document.positionAt(offset), h.workspace) ?? [];
+      assert.ok(declared?.uri.endsWith('app/Models/User.php'), body);
+      assert.ok(declared.range.start.line > 0, body);
+    }
+    for (const body of [`$model = 'App\\Models\\Miss|ing';`, `$name = 'Us|er';`]) {
+      const { document, offset } = h.document(php(body));
+      assert.equal(h.service.definition(document, document.positionAt(offset), h.workspace), null, body);
+    }
+  });
 });
 
 describe('code actions', () => {

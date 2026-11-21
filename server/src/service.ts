@@ -25,11 +25,11 @@ import {
   STATUS_COMMAND,
   tableMarkdown,
 } from './features/completion.ts';
-import { definition } from './features/definition.ts';
+import { classDefinition, definition } from './features/definition.ts';
 import { diagnose } from './features/diagnostics.ts';
 import { hover, targetOf } from './features/hover.ts';
 import { findColumn, resolveTables } from './features/resolve.ts';
-import { PhpDocument } from './php/document.ts';
+import { literalValue, PhpDocument } from './php/document.ts';
 import { columnKey, describeKey } from './usage.ts';
 import type { Workspace } from './workspace.ts';
 
@@ -158,6 +158,12 @@ export class QueryService {
 
   definition(document: TextDocument, position: Position, workspace: Workspace): Location[] | null {
     const offset = document.offsetAt(position);
+    const doc = this.parse(document);
+    const value = literalValue(doc.stringAt(doc.stringIndexAt(offset)));
+    const declared = value === undefined ? null : classDefinition(value, workspace.project);
+    if (declared) {
+      return declared;
+    }
     const context = this.contextAt(document, offset, workspace);
     return context ? definition(context, offset, workspace.store, workspace.project) : null;
   }
