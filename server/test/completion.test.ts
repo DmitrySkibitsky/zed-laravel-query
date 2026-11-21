@@ -148,6 +148,16 @@ describe('columns', () => {
     assert.ok((await top(`foreach (User::all() as $u) { $u->posts()->where('|'); }`)).includes('title'));
   });
 
+  test('@var over an assignment the right-hand side cannot type', async () => {
+    // `‸` marks the cursor: `|` belongs to the union type.
+    const unknownRhs = `$job = app(JobRepository::class)->query()->find($id);`;
+    assert.ok((await top(`/** @var User|Post $job */\n${unknownRhs}\n$job->roles()->pluck('‸');`)).includes('slug'));
+    assert.ok((await top(`/** @var User $job */\n${unknownRhs}\n$job->posts()->pluck('‸');`)).includes('title'));
+    assert.ok((await top(`${unknownRhs}\n/** @var Post $job */\n$job->where('‸');`)).includes('title'));
+    // A doc far above is only a fallback: a resolved assignment wins.
+    assert.ok((await top(`/** @var User $job */\nfoo();\n$job = Post::query();\n$job->where('‸');`)).includes('title'));
+  });
+
   test('scopes and $this inside a model', async () => {
     const model = `<?php
 namespace App\\Models;

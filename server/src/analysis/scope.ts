@@ -681,11 +681,39 @@ export class Analyzer {
     return this.assignmentScope(name, 0, at, undefined) ?? emptyScope();
   }
 
-  /** The last assignment `$name = expr` / `foreach (expr as $name)` / `@var` before `at`. */
+  /**
+   * The last assignment `$name = expr` / `foreach (expr as $name)` / `@var` before `at`.
+   *
+   * A `@var` right above the assignment (or after it) states the type the right-hand side
+   * cannot tell, e.g. `$job = app(JobRepository::class)->query()->find($id)`, so it wins.
+   * An earlier `@var` is only a fallback when the right-hand side does not resolve.
+   */
   private assignmentScope(name: string, from: number, at: number, fn: FunctionDecl | undefined): Scope | undefined {
+    const start = Math.max(0, from);
+    const assigned = this.lastAssignment(name, start, at, fn);
+    // Docs from the token before the assignment: the doc block of its statement and later ones.
+    const declared = this.declaredScope(name, assigned ? Math.max(start, assigned.tok - 1) : start, at);
+    if (declared) {
+      return declared;
+    }
+    if (!assigned) {
+      return undefined;
+    }
+    const { scope } = assigned;
+    if (scope.tables.length > 0 || scope.model || (scope.kind !== 'unknown' && !scope.inferred)) {
+      return scope;
+    }
+    return (assigned.tok - 1 > start ? this.declaredScope(name, start, assigned.tok - 1) : undefined) ?? scope;
+  }
+
+  private lastAssignment(
+    name: string,
+    start: number,
+    at: number,
+    fn: FunctionDecl | undefined,
+  ): { tok: number; scope: Scope } | undefined {
     const doc = this.doc;
     const t = doc.tokens;
-    const start = Math.max(0, from);
     for (let i = at - 1; i >= start; i--) {
       const token = t[i];
       if (token.type !== 'var' || token.value !== name) {
@@ -703,7 +731,7 @@ export class Analyzer {
           continue;
         }
         // `$q = $q->where(...)` refers to the previous $q: resolve before this statement.
-        return this.scopeOfExpression(this.lastChainToken(rhsStart, rhsEnd));
+        return { tok: i, scope: this.scopeOfExpression(this.lastChainToken(rhsStart, rhsEnd)) };
       }
       if (doc.isIdent(i - 1, 'as') || (doc.isOp(i - 1, '=>') && this.isForeachValue(i))) {
         const open = this.foreachOpen(i);
@@ -712,17 +740,21 @@ export class Analyzer {
           if (asTok > open + 1) {
             const scope = cloneScope(this.scopeOfExpression(asTok - 1));
             scope.collection = true;
-            return scope;
+            return { tok: i, scope };
           }
         }
       }
     }
-    // `/** @var User $user */`
-    const docs = doc.docsBetween(Math.max(0, from), at);
+    return undefined;
+  }
+
+  /** The type of the last `/** @var User $user *\/` for `$name` within the token range [from, to]. */
+  private declaredScope(name: string, from: number, to: number): Scope | undefined {
+    const docs = this.doc.docsBetween(from, to);
     for (let d = docs.length - 1; d >= 0; d--) {
       const type = docType(docs[d].value, '@var', name);
       if (type) {
-        const scope = this.scopeOfType(type, at);
+        const scope = this.scopeOfType(type, to);
         if (scope) {
           return scope;
         }
