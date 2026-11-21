@@ -624,6 +624,10 @@ describe('long-lived codebases', () => {
     assert.ok((await legacy.labels(php(`User::joinRelationship('‸');`))).includes('posts'));
     const joined = await legacy.labels(php(`User::joinRelationship('posts.comments')->where('‸');`));
     assert.ok(joined.includes('name') && joined.includes('posts.title') && joined.includes('comments.content'));
+    assert.ok((await legacy.labels(php(`User::query()->leftJoinRelation('‸');`))).includes('posts'), 'a short alias');
+    assert.ok((await legacy.labels(php(`User::powerJoinHas('‸');`))).includes('posts'), 'a join-based has');
+    const short = await legacy.labels(php(`User::leftJoinRelation('posts')->where('‸');`));
+    assert.ok(short.includes('posts.title'), short.join(', '));
     const aliased = await legacy.labels(php(`User::leftJoinRelationshipUsingAlias('posts', 'p')->where('p.‸');`));
     assert.ok(aliased.includes('p.title'), aliased.join(', '));
     const closure = await legacy.labels(

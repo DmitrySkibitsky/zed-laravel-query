@@ -51,9 +51,9 @@ function catalog(spec: Record<string, string>): MethodCatalog {
   return out;
 }
 
-/** Joins of a relation path (kirschbaum-development/eloquent-power-joins). */
+/** Joins of a relation path (kirschbaum-development/eloquent-power-joins), with their short aliases. */
 export const POWER_JOINS =
-  'joinRelationship leftJoinRelationship rightJoinRelationship joinRelationshipUsingAlias leftJoinRelationshipUsingAlias rightJoinRelationshipUsingAlias';
+  'joinRelationship leftJoinRelationship rightJoinRelationship joinRelationshipUsingAlias leftJoinRelationshipUsingAlias rightJoinRelationshipUsingAlias joinRelation leftJoinRelation rightJoinRelation joinNestedRelationship';
 
 /** Query builder, Eloquent builder, relations, join clauses, models (static and instance). */
 export const BUILDER_METHODS = catalog({
@@ -116,6 +116,7 @@ export const BUILDER_METHODS = catalog({
     'p0',
   'withPivot orderByPivot': 'p0+',
   [POWER_JOINS]: 'r0',
+  'powerJoinHas powerJoinDoesntHave powerJoinWhereHas': 'r0',
   onConnection: 'n0',
 });
 
