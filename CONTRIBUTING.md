@@ -69,6 +69,11 @@ logs` → `laravel-query` (connection discovery, schema reads with their timing,
   `<type>(<scope>): <short description>`, e.g. `fix(server): complete columns of aliased joins`.
   Scopes: `server`, `extension`, `ci`, `nix`, `deps`. Formatting-only changes go in their own
   `style:` commit.
+- Doc block tags and other `@word` tokens (`@var`, `@return`, `@property`, `@mixin`…) are always
+  in backticks in commit messages, pull request titles and descriptions, and release notes.
+  GitHub reads a bare `@var` as a mention of the user `var`: it notifies them, and the release
+  notes generated from pull request titles list them under **Contributors** (this happened to
+  v0.1.0).
 - One concern per pull request. Every commit should make sense on its own: pull requests are
   usually merged with **Rebase**, which keeps them; a branch with fix-up commits is squashed.
 - `main` is protected by two rulesets: a pull request gets in only when the **CI result** check
